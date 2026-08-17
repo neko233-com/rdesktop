@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rdesktop-core",
+    "crates/rdesktop-webview",
+    "crates/rdesktop-cef",
+    "crates/rdesktop-dev",
+    "crates/rdesktop-bundler",
+    "crates/rdesktop-cli",
+    "examples/hello_world",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nicedoc/rdesktop"
+
+[workspace.dependencies]
+rdesktop-core = { path = "crates/rdesktop-core" }
+rdesktop-webview = { path = "crates/rdesktop-webview" }
+rdesktop-cef = { path = "crates/rdesktop-cef" }
+rdesktop-dev = { path = "crates/rdesktop-dev" }
+rdesktop-bundler = { path = "crates/rdesktop-bundler" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"

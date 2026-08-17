@@ -1,0 +1,19 @@
+[package]
+name = "rdesktop-core"
+description = "Core abstractions for rdesktop - a dual-engine Rust desktop framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+raw-window-handle = "0.6"
+dpi = "0.1"
+url = "2"
+
+[features]
+default = []

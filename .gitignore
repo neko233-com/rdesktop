@@ -1,0 +1,39 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*.app/
+
+# CEF binaries (large, downloaded separately)
+cef/
+chromium/
+
+# Node (for frontend tooling)
+node_modules/
+dist/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local

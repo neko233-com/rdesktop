@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hello rdesktop</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+        }
+        .container {
+            text-align: center;
+            padding: 2rem;
+        }
+        h1 {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
+        p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            margin-bottom: 2rem;
+        }
+        .card {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 2rem;
+            margin: 1rem;
+            display: inline-block;
+            min-width: 300px;
+        }
+        .card h2 { margin-bottom: 1rem; }
+        .card code {
+            background: rgba(0,0,0,0.2);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        .ipc-demo {
+            margin-top: 1rem;
+        }
+        .ipc-demo input {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            margin-right: 8px;
+        }
+        .ipc-demo button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 8px;
+            background: #667eea;
+            color: white;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+        .ipc-demo button:hover { background: #5a6fd6; }
+        #result {
+            margin-top: 1rem;
+            font-size: 1.1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Hello rdesktop!</h1>
+        <p>A dual-engine Rust desktop framework</p>
+
+        <div class="card">
+            <h2>Renderer Info</h2>
+            <p>Backend: <code id="renderer">loading...</code></p>
+            <p>Platform: <code id="platform">loading...</code></p>
+        </div>
+
+        <div class="card">
+            <h2>IPC Demo</h2>
+            <div class="ipc-demo">
+                <input type="text" id="nameInput" placeholder="Enter your name" />
+                <button onclick="greet()">Greet</button>
+            </div>
+            <div id="result"></div>
+        </div>
+    </div>
+
+    <script>
+        // Show renderer info
+        document.getElementById('renderer').textContent =
+            navigator.userAgent.includes('Edg') ? 'WebView2 (Edge)' :
+            navigator.userAgent.includes('Chrome') ? 'Chrome/CEF' :
+            navigator.userAgent.includes('Safari') ? 'WebKit' : 'Unknown';
+
+        document.getElementById('platform').textContent =
+            navigator.platform || 'Unknown';
+
+        // IPC bridge
+        window.__RDESKTOP_IPC__ = function(message) {
+            console.log('IPC from backend:', message);
+        };
+
+        // Invoke a backend command
+        async function invoke(cmd, payload) {
+            const id = Math.random().toString(36).slice(2);
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('IPC timeout')), 5000);
+                window.__RDESKTOP_IPC_RESOLVE__ = window.__RDESKTOP_IPC_RESOLVE__ || {};
+                window.__RDESKTOP_IPC_RESOLVE__[id] = (response) => {
+                    clearTimeout(timeout);
+                    resolve(response);
+                };
+                // In a real app, this would use the native IPC bridge
+                // window.ipc.postMessage(JSON.stringify({ id, cmd, payload }));
+
+                // Demo: simulate response
+                setTimeout(() => {
+                    if (window.__RDESKTOP_IPC_RESOLVE__[id]) {
+                        window.__RDESKTOP_IPC_RESOLVE__[id]({
+                            id,
+                            success: true,
+                            data: { message: `Hello, ${payload.name || 'World'}! (simulated)` }
+                        });
+                    }
+                }, 100);
+            });
+        }
+
+        async function greet() {
+            const name = document.getElementById('nameInput').value || 'World';
+            try {
+                const result = await invoke('greet', { name });
+                document.getElementById('result').textContent = result.data.message;
+            } catch (e) {
+                document.getElementById('result').textContent = 'Error: ' + e.message;
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+[package]
+name = "rdesktop-webview"
+description = "WebView backend for rdesktop (WebView2/WebKit/WebKitGTK)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rdesktop-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+wry = "0.56"
+tao = "0.36"
+raw-window-handle = "0.6"
+url = "2"
+
+[features]
+default = ["os-webview"]
+os-webview = []
+devtools = ["wry/devtools"]

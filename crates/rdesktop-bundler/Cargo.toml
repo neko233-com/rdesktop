@@ -1,0 +1,18 @@
+[package]
+name = "rdesktop-bundler"
+description = "Cross-platform bundler for rdesktop - produces installers and executables"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rdesktop-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+toml = "0.8"
+
+[features]
+default = []
