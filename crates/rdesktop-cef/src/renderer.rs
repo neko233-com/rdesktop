@@ -362,9 +362,10 @@ impl Renderer for CefRenderer {
                 PendingOp::LoadHtml(_, html) => { rt.block_on(async { let _ = page.set_content(html.as_str()).await; }); }
                 PendingOp::EvalScript(_, script) => { rt.block_on(async { let _ = page.evaluate(script.as_str()).await; }); }
                 PendingOp::SendToFrontend(_, msg) => {
-                    let esc = msg.replace('\\', "\\\\").replace('\'', "\\'");
-                    let s = format!("window.__RDESKTOP_IPC__('{esc}')");
-                    rt.block_on(async { let _ = page.evaluate(s.as_str()).await; });
+                    if let Ok(js) = serde_json::to_string(msg) {
+                        let s = format!("window.__RDESKTOP_IPC__({js})");
+                        rt.block_on(async { let _ = page.evaluate(s.as_str()).await; });
+                    }
                 }
             }
         }
@@ -538,9 +539,10 @@ impl Renderer for CefRenderer {
                     for op in live_ops {
                         if let PendingOp::SendToFrontend(rd_id, msg) = op {
                             if let Some((_, p)) = pages.iter().find(|(id, _)| *id == rd_id) {
-                                let esc = msg.replace('\\', "\\\\").replace('\'', "\\'");
-                                let script = format!("window.__RDESKTOP_IPC__('{esc}')");
-                                let _ = rt.block_on(p.page.evaluate(script.as_str()));
+                                if let Ok(js) = serde_json::to_string(&msg) {
+                                    let script = format!("window.__RDESKTOP_IPC__({js})");
+                                    let _ = rt.block_on(p.page.evaluate(script.as_str()));
+                                }
                             }
                         }
                     }
