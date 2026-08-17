@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rdesktop_core::config::{AppConfig, WindowConfig};
 use rdesktop_core::ipc::{IpcHandler, IpcMessage};
@@ -108,6 +108,10 @@ pub struct CefRenderer {
     ipc_handler: Option<Arc<dyn IpcHandler>>,
     mod_shift: RefCell<bool>,
     mod_caps: RefCell<bool>,
+    /// External outbox for native → frontend pushes (e.g. a Node extension
+    /// host, or global hotkey / global input events). Drained every frame by
+    /// the event loop, same contract as the WebView backend.
+    outbox: Arc<Mutex<Vec<String>>>,
 }
 
 impl CefRenderer {
@@ -120,7 +124,16 @@ impl CefRenderer {
             ipc_handler: None,
             mod_shift: RefCell::new(false),
             mod_caps: RefCell::new(false),
+            outbox: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// Attach an external outbox so other runtimes (e.g. a Node extension host,
+    /// or the global hotkey / input managers) can push messages to the
+    /// frontend. Each entry is a JSON string emitted as
+    /// `window.__RDESKTOP_IPC__(<json>)`.
+    pub fn set_outbox(&mut self, outbox: Arc<Mutex<Vec<String>>>) {
+        self.outbox = outbox;
     }
 
     fn alloc_id(&self) -> u64 {
@@ -185,6 +198,10 @@ impl CefRenderer {
                     if (data.id && window.__RDESKTOP_RESOLVE__[data.id]) {
                         window.__RDESKTOP_RESOLVE__[data.id](data);
                         delete window.__RDESKTOP_RESOLVE__[data.id];
+                    } else if (window.__RDESKTOP_PUSH__) {
+                        // Unnamed push (e.g. extension host → UI event, or a
+                        // global hotkey / global input event).
+                        window.__RDESKTOP_PUSH__(data);
                     }
                 } catch (e) { console.error('rdesktop IPC error:', e); }
             };
@@ -313,6 +330,44 @@ impl Renderer for CefRenderer {
 
         let pending_pages = self.pending_pages.borrow_mut().drain(..).collect::<Vec<_>>();
         let pending_ops = self.pending_ops.borrow_mut().drain(..).collect::<Vec<_>>();
+
+        // External outbox for native → frontend pushes (Node extension host, etc.)
+        let outbox_for_loop = self.outbox.clone();
+
+        // ── Phase 2: global hotkeys & input hooks ───────────────────────
+        // Wired through the shared outbox so the frontend receives them as
+        // `window.__RDESKTOP_PUSH__` events (`rdesktop.globalHotkey` /
+        // `rdesktop.globalInput`). Managers live for the whole event loop.
+        let global_handler = rdesktop_core::PushHandler::new(self.outbox.clone());
+        let _hotkey_manager = {
+            let mgr = rdesktop_core::HotkeyManager::new(global_handler.clone());
+            for (i, hc) in self._config.hotkeys.iter().enumerate() {
+                if let Ok(hk) = hc.combo.parse::<rdesktop_core::Hotkey>() {
+                    let id = i as u32 + 1;
+                    if let Err(e) = mgr.register(id, &hk) {
+                        tracing::warn!("failed to register hotkey {:?}: {}", hc.combo, e);
+                    }
+                } else {
+                    tracing::warn!("invalid hotkey combo: {:?}", hc.combo);
+                }
+            }
+            mgr
+        };
+        let _input_manager = if self._config.global_input.enabled {
+            let mut inp = rdesktop_core::GlobalInput::new(global_handler.clone());
+            if self._config.global_input.mouse_move {
+                inp = inp.with_mouse_move(true);
+            }
+            match inp.start() {
+                Ok(()) => Some(inp),
+                Err(e) => {
+                    tracing::warn!("failed to start global input: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let rt = Runtime::new().map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
 
@@ -547,6 +602,22 @@ impl Renderer for CefRenderer {
                                     let script = format!("window.__RDESKTOP_IPC__({js})");
                                     let _ = rt.block_on(p.page.evaluate(script.as_str()));
                                 }
+                            }
+                        }
+                    }
+
+                    // External outbox (native → frontend pushes): global hotkeys,
+                    // global input hooks, and the Node extension host. Broadcast to
+                    // every page so each window receives the event.
+                    let outbox_msgs: Vec<String> = {
+                        let mut queue = outbox_for_loop.lock().unwrap();
+                        queue.drain(..).collect()
+                    };
+                    for json in outbox_msgs {
+                        if let Ok(js) = serde_json::to_string(&json) {
+                            let script = format!("window.__RDESKTOP_IPC__({js})");
+                            for (_, p) in pages.iter() {
+                                let _ = rt.block_on(p.page.evaluate(script.as_str()));
                             }
                         }
                     }

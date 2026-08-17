@@ -23,6 +23,12 @@ pub enum RdesktopError {
     #[error("WebView error: {0}")]
     WebView(String),
 
+    #[error("Unsupported platform: {0}")]
+    UnsupportedPlatform(String),
+
+    #[error("Global input error: {0}")]
+    GlobalInput(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

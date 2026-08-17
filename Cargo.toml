@@ -9,6 +9,7 @@ members = [
     "crates/rdesktop-cli",
     "examples/hello_world",
     "examples/wallpaper",
+    "examples/global_hotkey",
 ]
 
 [workspace.package]

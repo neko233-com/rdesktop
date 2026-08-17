@@ -340,15 +340,124 @@ desktop, with a CSS-gradient fallback when WebGPU is unavailable.
 - A click-through wallpaper receives no pointer input by design; it must be
   closed programmatically (e.g. via a tray quit command).
 
+## Global Input & Hotkeys (Phase 2)
+
+Phase 2 delivers system-wide input capture and global shortcuts — capabilities
+that exceed Tauri v2's `global-shortcut` (which only covers a fixed subset and
+no raw input stream). rdesktop owns the platform integration directly and feeds
+both backends through a single, renderer-agnostic event contract.
+
+### Module layout (`rdesktop-core`)
+
+```
+hotkeys.rs     Platform-agnostic types + manager
+  ├─ Modifiers { ctrl, alt, shift, meta }      (from_raw_win / from_raw_mac)
+  ├─ Key enum (Letter / Digit / F / Arrow / Function …)
+  ├─ Hotkey { modifiers, key }                 (FromStr: "Ctrl+Shift+K", Display)
+  ├─ HotkeyHandler trait                        (fn on_hotkey(&self, id, &Hotkey))
+  └─ HotkeyManager { register / unregister }    (owns the platform impl)
+
+input.rs       Global input stream + manager
+  ├─ KeyState / MouseButton
+  ├─ GlobalInputEvent::{ Keyboard, Mouse, MouseMove }
+  ├─ GlobalInputHandler trait                   (fn on_event(&self, &GlobalInputEvent))
+  └─ GlobalInput { start / stop, with_mouse_move }
+
+#[cfg(windows)]  hotkeys_win.rs / input_win.rs   (real implementations)
+#[cfg(macos)]    hotkeys_mac.rs / input_mac.rs    (CGEventTap stubs — unverified)
+global.rs      PushHandler + Outbox (the shared delivery contract)
+```
+
+### Windows implementation
+
+- **Global hotkeys** (`hotkeys_win.rs`): `RegisterHotKey(hwnd=0, id, MOD_*, vk)`
+  runs on a dedicated thread that pumps `GetMessageW` / `WM_HOTKEY`. This is the
+  *application-level* shortcut path — distinct from the low-level hook below.
+- **Global input** (`input_win.rs`): `SetWindowsHookExW(WH_KEYBOARD_LL | WH_MOUSE_LL,
+  …, 0, 0)` installed on a dedicated thread that pumps messages; the low-level
+  hook callback runs on that same thread (a hard Windows requirement). A static
+  `Mutex<Option<Arc<InputCtx>>>` shares the handler + modifier state with the
+  callbacks. `PostThreadMessageW(WM_QUIT)` tears the thread down.
+- `GetAsyncKeyState` reconstructs the live modifier mask for each key event.
+
+### Event delivery contract (both backends)
+
+Both backends share one outbox:
+
+```
+HotkeyManager / GlobalInput  ──on_hotkey/on_event──▶  PushHandler
+                                                        │  json!({cmd, payload})
+                                                        ▼
+                                              Arc<Mutex<Vec<String>>>  (Outbox)
+                                                        │  drained every frame in MainEventsCleared
+                                                        ▼
+                              backend emits window.__RDESKTOP_IPC__(json)
+                                                        │
+                                                        ▼
+                              frontend window.__RDESKTOP_PUSH__(data)
+```
+
+`PushHandler` (in `global.rs`) implements both `HotkeyHandler` and
+`GlobalInputHandler` and pushes JSON envelopes into the shared `Outbox`:
+
+```json
+// Global hotkey fired
+{ "cmd": "rdesktop.globalHotkey", "payload": { "id": 1, "combo": "Ctrl+Shift+K" } }
+
+// Raw input event
+{ "cmd": "rdesktop.globalInput",
+  "payload": { "type": "keyboard", "key": "KeyK", "state": "pressed",
+               "modifiers": { "ctrl": true, "shift": true, "alt": false, "meta": false } } }
+```
+
+Each backend drains `Outbox` every frame (in `MainEventsCleared`) and emits each
+entry through the same bridge used for `send_to_frontend`. The bridge forwards
+unnamed entries (`data` without an `id`) to `window.__RDESKTOP_PUSH__`, so the
+frontend needs no special wiring beyond defining that one handler.
+
+### Config schema
+
+```rust
+pub struct AppConfig {
+    pub hotkeys: Vec<HotkeyConfig>,          // serde(default)
+    pub global_input: GlobalInputConfig,     // serde(default)
+}
+
+pub struct HotkeyConfig { pub id: Option<String>, pub combo: String, pub title: Option<String> }
+pub struct GlobalInputConfig { pub enabled: bool, pub keyboard: bool, pub mouse: bool, pub mouse_move: bool }
+```
+
+Valid combos follow the parser: `Ctrl`, `Alt`, `Shift`, `Meta` (in any order,
+`+`-separated) followed by a key token (`A`–`Z`, `0`–`9`, `F1`–`F24`, `Enter`,
+`Space`, `Tab`, `Esc`/`Escape`, `Backspace`, `Delete`, `ArrowUp/Down/Left/Right`,
+`Home/End/PageUp/PageDown`, `PrintScreen`, …).
+
+### Example
+
+`examples/global_hotkey` registers `Ctrl+Shift+K` + `Alt+PrintScreen` and enables
+global keyboard/mouse capture, then renders a live log of hotkey + input events
+in the frontend via `window.__RDESKTOP_PUSH__`.
+
+### Caveats
+
+- Windows low-level hooks require the installing thread to pump messages; both
+  managers spawn their own thread for exactly this reason.
+- The macOS `CGEventTap` paths (`hotkeys_mac.rs` / `input_mac.rs`) are **stubbed**
+  and return `UnsupportedPlatform`; they are not compiled/verified on this Windows
+  dev host and require a macOS build to complete.
+- `mouse_move` is off by default — enabling it floods the outbox with move events.
+
 ## Roadmap
 
 ### Implemented
 - [x] Dual-engine renderer (WebView + Chrome/CEF via CDP)
 - [x] Pull-based IPC bridge (both backends)
 - [x] Phase 0: `WindowKind` (Normal/Overlay/Wallpaper) + click-through + desktop layer + `webgpu` flag
+- [x] Phase 1: Node.js extension host (rcode PoC) + native → frontend Outbox push
+- [x] Phase 2: Global mouse/keyboard hook + global hotkeys (Windows; macOS stub)
 
 ### Planned (deep desktop)
-- [ ] Phase 2: Global mouse/keyboard hook + global hotkeys
+- [ ] Phase 2 (macOS): complete `CGEventTap` hotkey + input impls; Linux X11/Wayland
 - [ ] Phase 3: Input simulation & device remapping (Logitech G-Hub style)
 - [ ] Phase 4: Media session (SMTC) + HiFi/WASAPI audio engine
 - [ ] Phase 5: Cross-platform alignment; tray / notify / autostart system layer

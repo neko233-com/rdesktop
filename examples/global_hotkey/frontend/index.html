@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>rdesktop — Global Hotkey &amp; Input</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #0d1117; color: #e6edf3; padding: 24px;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .hint { color: #8b949e; font-size: 13px; margin-bottom: 18px; }
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .panel {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 14px; min-height: 320px; display: flex; flex-direction: column;
+  }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+    color: #58a6ff; margin: 0 0 10px; }
+  #log { flex: 1; overflow-y: auto; font-size: 12px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-all; }
+  .row { padding: 4px 6px; border-bottom: 1px solid #21262d; }
+  .row .cmd { color: #7ee787; }
+  .row .ts { color: #6e7681; margin-right: 8px; }
+  kbd {
+    background: #21262d; border: 1px solid #30363d; border-bottom-width: 2px;
+    border-radius: 4px; padding: 1px 6px; font-size: 12px; color: #e6edf3;
+  }
+</style>
+</head>
+<body>
+  <h1>rdesktop — Global Hotkey &amp; Input</h1>
+  <div class="hint">
+    Try the global shortcuts anywhere on the desktop:
+    <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd> (toggle overlay) and
+    <kbd>Alt</kbd>+<kbd>PrintScreen</kbd> (screenshot).
+    Keyboard and mouse events are captured system-wide even when this window
+    is unfocused.
+  </div>
+  <div class="panels">
+    <div class="panel">
+      <h2>Global Hotkeys</h2>
+      <div id="hotkey-log"><div class="row">waiting for a global shortcut…</div></div>
+    </div>
+    <div class="panel">
+      <h2>Global Input</h2>
+      <div id="input-log"><div class="row">waiting for keyboard / mouse events…</div></div>
+    </div>
+  </div>
+
+<script>
+  // rdesktop drains its native outbox every frame and emits each entry as
+  // `window.__RDESKTOP_IPC__(json)`. Unnamed entries (no `id`) are forwarded
+  // here via `window.__RDESKTOP_PUSH__`.
+  window.__RDESKTOP_PUSH__ = function (data) {
+    if (!data || !data.cmd) return;
+    if (data.cmd === "rdesktop.globalHotkey") {
+      append("hotkey-log", "hotkey", data.payload.combo || JSON.stringify(data.payload));
+    } else if (data.cmd === "rdesktop.globalInput") {
+      append("input-log", "input", JSON.stringify(data.payload));
+    }
+  };
+
+  function append(elId, cls, text) {
+    var box = document.getElementById(elId);
+    var placeholder = box.querySelector(".row");
+    if (placeholder && /waiting/i.test(placeholder.textContent)) box.innerHTML = "";
+    var row = document.createElement("div");
+    row.className = "row";
+    var ts = new Date().toLocaleTimeString();
+    row.innerHTML = '<span class="ts">' + ts + '</span><span class="' + cls + '">' +
+      escapeHtml(text) + "</span>";
+    box.appendChild(row);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c];
+    });
+  }
+</script>
+</body>
+</html>

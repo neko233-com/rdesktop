@@ -46,6 +46,17 @@ pub struct AppConfig {
     /// Custom IPC command handlers
     #[serde(default)]
     pub commands: HashMap<String, CommandConfig>,
+
+    /// Global hotkeys registered at the OS level (fire even when the window is
+    /// unfocused). Each entry parses its `combo` via `Hotkey::from_str`
+    /// (e.g. "Ctrl+Shift+K", "Alt+F4", "Meta+Space").
+    #[serde(default)]
+    pub hotkeys: Vec<HotkeyConfig>,
+
+    /// Global input hook configuration (system-wide keyboard/mouse capture).
+    /// Off by default — enable explicitly to observe raw input events.
+    #[serde(default)]
+    pub global_input: GlobalInputConfig,
 }
 
 impl Default for AppConfig {
@@ -59,6 +70,8 @@ impl Default for AppConfig {
             dev: DevConfig::default(),
             bundle: BundleConfig::default(),
             commands: HashMap::new(),
+            hotkeys: Vec::new(),
+            global_input: GlobalInputConfig::default(),
         }
     }
 }
@@ -311,6 +324,57 @@ pub struct CommandConfig {
     /// Environment variables
     #[serde(default)]
     pub env: HashMap<String, String>,
+}
+
+/// A global hotkey declared in configuration.
+///
+/// `id` is an optional stable identifier echoed back to the handler; `combo`
+/// is parsed by [`crate::hotkeys::Hotkey::from_str`] (case-insensitive,
+/// `+`-separated modifiers, e.g. `"Ctrl+Shift+K"`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotkeyConfig {
+    /// Stable identifier for this hotkey (echoed to the handler). If omitted,
+    /// the list index is used.
+    #[serde(default)]
+    pub id: Option<String>,
+
+    /// Key combination string, e.g. "Alt+F4", "Meta+Shift+P".
+    pub combo: String,
+
+    /// Optional human-readable title (shown in UI lists).
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// Global input hook configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalInputConfig {
+    /// Master switch for global input capture.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Capture keyboard events.
+    #[serde(default = "default_true")]
+    pub keyboard: bool,
+
+    /// Capture mouse button events.
+    #[serde(default = "default_true")]
+    pub mouse: bool,
+
+    /// Also forward high-frequency `MouseMove` events (off by default).
+    #[serde(default)]
+    pub mouse_move: bool,
+}
+
+impl Default for GlobalInputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            keyboard: true,
+            mouse: true,
+            mouse_move: false,
+        }
+    }
 }
 
 // Default value functions for serde

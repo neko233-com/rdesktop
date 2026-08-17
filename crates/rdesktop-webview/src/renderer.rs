@@ -394,6 +394,41 @@ impl Renderer for WebViewRenderer {
         // External outbox for native → frontend pushes (Node extension host, etc.)
         let outbox_for_loop = self.outbox.clone();
 
+        // ── Phase 2: global hotkeys & input hooks ───────────────────────
+        // Wired through the shared outbox so the frontend receives them as
+        // `window.__RDESKTOP_PUSH__` events (`rdesktop.globalHotkey` /
+        // `rdesktop.globalInput`). Managers live for the whole event loop.
+        let global_handler = rdesktop_core::PushHandler::new(self.outbox.clone());
+        let _hotkey_manager = {
+            let mgr = rdesktop_core::HotkeyManager::new(global_handler.clone());
+            for (i, hc) in self._config.hotkeys.iter().enumerate() {
+                if let Ok(hk) = hc.combo.parse::<rdesktop_core::Hotkey>() {
+                    let id = i as u32 + 1;
+                    if let Err(e) = mgr.register(id, &hk) {
+                        tracing::warn!("failed to register hotkey {:?}: {}", hc.combo, e);
+                    }
+                } else {
+                    tracing::warn!("invalid hotkey combo: {:?}", hc.combo);
+                }
+            }
+            mgr
+        };
+        let _input_manager = if self._config.global_input.enabled {
+            let mut inp = rdesktop_core::GlobalInput::new(global_handler.clone());
+            if self._config.global_input.mouse_move {
+                inp = inp.with_mouse_move(true);
+            }
+            match inp.start() {
+                Ok(()) => Some(inp),
+                Err(e) => {
+                    tracing::warn!("failed to start global input: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Window command queue for IPC-triggered window operations
         let window_cmd_queue: WindowCommandQueue = Arc::new(Mutex::new(Vec::new()));
         let window_cmd_queue_for_ipc = window_cmd_queue.clone();
