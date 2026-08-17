@@ -5,9 +5,10 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use rdesktop_core::config::{AppConfig, WindowConfig};
-use rdesktop_core::ipc::IpcHandler;
+use rdesktop_core::ipc::{IpcHandler, IpcMessage};
 use rdesktop_core::renderer::{Renderer, RendererKind, ResizeEdge};
 use rdesktop_core::window::WindowHandle;
 use rdesktop_core::Result;
@@ -104,6 +105,9 @@ pub struct CefRenderer {
     pending_pages: RefCell<Vec<(u64, WindowConfig)>>,
     pending_ops: RefCell<Vec<PendingOp>>,
     next_id: RefCell<u64>,
+    ipc_handler: Option<Arc<dyn IpcHandler>>,
+    mod_shift: RefCell<bool>,
+    mod_caps: RefCell<bool>,
 }
 
 impl CefRenderer {
@@ -113,6 +117,9 @@ impl CefRenderer {
             pending_pages: RefCell::new(Vec::new()),
             pending_ops: RefCell::new(Vec::new()),
             next_id: RefCell::new(1),
+            ipc_handler: None,
+            mod_shift: RefCell::new(false),
+            mod_caps: RefCell::new(false),
         })
     }
 
@@ -153,13 +160,12 @@ impl CefRenderer {
             if (window.__RDESKTOP_BRIDGE__) return;
             window.__RDESKTOP_BRIDGE__ = true;
             window.__RDESKTOP_RESOLVE__ = {};
+            window.__RDESKTOP_QUEUE__ = [];
             window.__RDESKTOP_INVOKE__ = function(cmd, payload) {
                 return new Promise(function(resolve, reject) {
                     var id = Math.random().toString(36).slice(2);
                     window.__RDESKTOP_RESOLVE__[id] = resolve;
-                    window.dispatchEvent(new CustomEvent('__rdesktop_ipc__', {
-                        detail: JSON.stringify({ id: id, cmd: cmd, payload: payload || {} })
-                    }));
+                    window.__RDESKTOP_QUEUE__.push({ id: id, cmd: cmd, payload: payload || {} });
                     setTimeout(function() {
                         if (window.__RDESKTOP_RESOLVE__[id]) {
                             delete window.__RDESKTOP_RESOLVE__[id];
@@ -167,6 +173,11 @@ impl CefRenderer {
                         }
                     }, 30000);
                 });
+            };
+            window.__rdesktop_take__ = function() {
+                var q = window.__RDESKTOP_QUEUE__ || [];
+                window.__RDESKTOP_QUEUE__ = [];
+                return JSON.stringify(q);
             };
             window.__RDESKTOP_IPC__ = function(message) {
                 try {
@@ -272,7 +283,9 @@ impl Renderer for CefRenderer {
     fn eval_script(&self, w: WindowHandle, script: &str) -> Result<()> {
         self.pending_ops.borrow_mut().push(PendingOp::EvalScript(w.id(), script.into())); Ok(())
     }
-    fn set_ipc_handler(&mut self, _h: Box<dyn IpcHandler>) {}
+    fn set_ipc_handler(&mut self, h: Box<dyn IpcHandler>) {
+        self.ipc_handler = Some(Arc::from(h));
+    }
     fn send_to_frontend(&self, w: WindowHandle, msg: &str) -> Result<()> {
         self.pending_ops.borrow_mut().push(PendingOp::SendToFrontend(w.id(), msg.into())); Ok(())
     }
@@ -448,9 +461,29 @@ impl Renderer for CefRenderer {
                                 ElementState::Released => DispatchKeyEventType::KeyUp,
                                 _ => DispatchKeyEventType::KeyUp,
                             };
-                            let key_text = format!("{:?}", key_event.physical_key);
-                            let params = DispatchKeyEventParams::builder()
-                                .r#type(ts).key(key_text).build().unwrap();
+                            let physical = format!("{:?}", key_event.physical_key);
+
+                            // Track modifier state so CDP receives the correct
+                            // character in `text` (e.g. Shift+1 => "!", Shift+a => "A").
+                            if physical == "ShiftLeft" || physical == "ShiftRight" {
+                                *self.mod_shift.borrow_mut() = matches!(ts, DispatchKeyEventType::KeyDown);
+                            } else if physical == "CapsLock" && matches!(ts, DispatchKeyEventType::KeyDown) {
+                                let mut c = self.mod_caps.borrow_mut();
+                                *c = !*c;
+                            }
+                            let shift = *self.mod_shift.borrow();
+                            let caps = *self.mod_caps.borrow();
+
+                            let (key_text, text_opt) = cdp_key_event(&physical, shift, caps);
+                            let params_builder = DispatchKeyEventParams::builder()
+                                .r#type(ts)
+                                .key(key_text.clone())
+                                .code(physical.clone());
+                            let params = if let Some(t) = text_opt {
+                                params_builder.text(t).build().unwrap()
+                            } else {
+                                params_builder.build().unwrap()
+                            };
                             rt.block_on(async { let _ = p.page.execute(params).await; });
                         }
                     }
@@ -480,6 +513,38 @@ impl Renderer for CefRenderer {
                             }
                         }
                     }
+
+                    // Frontend → backend IPC: drain queued invokes and dispatch to the handler
+                    if let Some(handler) = self.ipc_handler.as_ref() {
+                        for (_, p) in pages.iter() {
+                            if let Ok(value) = rt.block_on(p.page.evaluate("window.__rdesktop_take__()")) {
+                                if let Some(raw) = value.value().and_then(|v| v.as_str()) {
+                                    if let Ok(messages) = serde_json::from_str::<Vec<IpcMessage>>(raw) {
+                                        for msg in messages {
+                                            let response = handler.handle(msg);
+                                            if let Ok(json) = serde_json::to_string(&response) {
+                                                let script = format!("window.__RDESKTOP_IPC__({})", json);
+                                                let _ = rt.block_on(p.page.evaluate(script.as_str()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Backend → frontend push (live send_to_frontend)
+                    let live_ops = self.pending_ops.borrow_mut().drain(..).collect::<Vec<_>>();
+                    for op in live_ops {
+                        if let PendingOp::SendToFrontend(rd_id, msg) = op {
+                            if let Some((_, p)) = pages.iter().find(|(id, _)| *id == rd_id) {
+                                let esc = msg.replace('\\', "\\\\").replace('\'', "\\'");
+                                let script = format!("window.__RDESKTOP_IPC__('{esc}')");
+                                let _ = rt.block_on(p.page.evaluate(script.as_str()));
+                            }
+                        }
+                    }
+
                     for (_, (window, rd_id)) in tao_windows.iter() {
                         if let Some((_, p)) = pages.iter().find(|(id, _)| id == rd_id) {
                             Self::blit(window, &p.pixels, p.width, p.height);
@@ -494,4 +559,48 @@ impl Renderer for CefRenderer {
     }
 
     fn kind(&self) -> RendererKind { RendererKind::Chrome }
+}
+
+/// Map a winit `KeyCode` debug name (e.g. "KeyA", "Digit1", "Enter") to the
+/// `key`/`text` values expected by CDP `Input.dispatchKeyEvent`.
+///
+/// Returns `(key, text)` where `text` is `Some` only for printable characters.
+/// When `shift` or `caps` is active, letters are uppercased and digits/symbols
+/// use their shifted variant, so `Shift+1` produces `"!"` instead of `"1"`.
+fn cdp_key_event(code: &str, shift: bool, caps: bool) -> (String, Option<String>) {
+    if let Some(c) = code.strip_prefix("Key") {
+        let upper = shift ^ caps;
+        let ch = if upper { c.to_uppercase() } else { c.to_lowercase() };
+        return (ch.clone(), Some(ch));
+    }
+    if let Some(d) = code.strip_prefix("Digit") {
+        const SHIFTED: &[&str] = &[")", "!", "@", "#", "$", "%", "^", "&", "*", "("];
+        if let Ok(idx) = d.parse::<usize>() {
+            if idx < SHIFTED.len() {
+                let s = if shift { SHIFTED[idx].to_string() } else { d.to_string() };
+                return (s.clone(), Some(s));
+            }
+        }
+    }
+    match code {
+        "Enter" => ("Enter".into(), None),
+        "Escape" => ("Escape".into(), None),
+        "Backspace" => ("Backspace".into(), None),
+        "Tab" => ("Tab".into(), None),
+        "Space" => (" ".into(), Some(" ".into())),
+        "ArrowLeft" => ("ArrowLeft".into(), None),
+        "ArrowRight" => ("ArrowRight".into(), None),
+        "ArrowUp" => ("ArrowUp".into(), None),
+        "ArrowDown" => ("ArrowDown".into(), None),
+        "Delete" => ("Delete".into(), None),
+        "Home" => ("Home".into(), None),
+        "End" => ("End".into(), None),
+        "PageUp" => ("PageUp".into(), None),
+        "PageDown" => ("PageDown".into(), None),
+        "ShiftLeft" | "ShiftRight" => ("Shift".into(), None),
+        "ControlLeft" | "ControlRight" => ("Control".into(), None),
+        "AltLeft" | "AltRight" => ("Alt".into(), None),
+        "MetaLeft" | "MetaRight" => ("Meta".into(), None),
+        _ => (code.to_string(), None),
+    }
 }

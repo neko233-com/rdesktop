@@ -59,7 +59,11 @@ rdesktop-webview
     └── tao 0.36       (Window management)
 
 rdesktop-cef
-    └── rdesktop-core   (CEF backend - stub)
+    └── rdesktop-core   (Chrome/Edge backend via CDP, chromiumoxide 0.9)
+        ├── chromiumoxide 0.9  (Chrome DevTools Protocol binding)
+        ├── tao 0.36           (window management)
+        ├── tokio              (async runtime for CDP)
+        └── png 0.18           (screenshot decode) + windows-sys (GDI blit)
 ```
 
 ## Renderer Abstraction
@@ -215,7 +219,7 @@ rdesktop bundle
 | WebView2 runtime | Must be installed | Auto-bootstrapper embedded |
 | Dev mode | Native window only | Browser mode (Agent-first) |
 
-## Chrome Embedded (CEF) Architecture
+## Chrome / Edge Backend (CDP via chromiumoxide)
 
 CEF requires a multi-process architecture:
 
@@ -243,22 +247,41 @@ CEF requires a multi-process architecture:
 └─────────────────────────────────────────┘
 ```
 
-### CEF Integration Steps
+### Design notes
 
-1. **Binary distribution**: CEF binaries are ~150MB and must be platform-specific
-2. **Subprocess model**: CEF requires separate browser/renderer/GPU processes
-3. **Off-screen rendering**: CEF renders to a buffer that's composited into the native window
-4. **IPC bridge**: Messages between Rust and JavaScript go through CEF's IPC mechanism
+The Chrome backend does **not** embed the CEF SDK. Instead it drives an
+installed Chrome/Edge over the Chrome DevTools Protocol (CDP) using
+`chromiumoxide`, which avoids shipping ~150MB of CEF binaries:
 
-> CEF backend is currently a stub. WebView is the production-ready backend.
+1. **Rendering**: Each frame captures a PNG screenshot via `Page.captureScreenshot`,
+   decodes it (`png` crate, RGBA→BGRA), and blits to the native tao window with
+   `StretchDIBits` (Windows GDI). Efficient composited-GPU rendering is a future
+   optimization; screenshot-blit is the current portable approach.
+2. **Input**: Mouse move/button/wheel and keyboard events are translated to CDP
+   `Input.dispatch*` commands. Keyboard `physical_key` is mapped to CDP `key`/
+   `text`; Shift/CapsLock state is tracked so `Shift+1` yields `"!"` and
+   `Shift+a` yields `"A"`.
+3. **IPC (pull-based)**: The injected bridge exposes `window.__RDESKTOP_INVOKE__`
+   (returns a promise) and queues calls in `window.__RDESKTOP_QUEUE__`. Rust polls
+   `window.__rdesktop_take__()` each frame, dispatches to the `Arc<dyn IpcHandler>`,
+   and pushes the `IpcResponse` back via `window.__RDESKTOP_IPC__(json)`.
+   `send_to_frontend` uses the same push path. A pull model is used (rather than
+   CDP `Runtime.bindingCalled`) because the chromiumoxide `Handler` stream only
+   yields `Result<()>` and the event stream is not `Send`, which complicates
+   moving it into the `FnMut` loop.
+4. **Platform**: GDI blit and Chrome auto-discovery are Windows-first; other
+   platforms fall back to a `tracing::warn!` no-op for blit.
+
+> The Chrome backend is functional on Windows (headless Chrome/Edge + GDI).
+> WebView remains the default production backend; Chrome is opt-in.
 
 ## Platform Support
 
 | Platform | WebView | Chrome | Status |
 |---|---|---|---|
-| Windows 10/11 | WebView2 (Edge) | CEF (stub) | WebView ✅ |
-| macOS 10.15+ | WKWebView | CEF (stub) | Planned |
-| Linux (X11/Wayland) | WebKitGTK | CEF (stub) | Planned |
+| Windows 10/11 | WebView2 (Edge) | CDP (headless Chrome/Edge + GDI) ✅ | WebView ✅ / Chrome ✅ |
+| macOS 10.15+ | WKWebView | CDP (pending GDI port) | WebView ✅ / Chrome Planned |
+| Linux (X11/Wayland) | WebKitGTK | CDP (pending GDI port) | WebView Planned / Chrome Planned |
 
 ## Future Roadmap
 
