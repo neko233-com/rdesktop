@@ -15,8 +15,11 @@ tracing = { workspace = true }
 chromiumoxide = "0.9"
 tokio = { workspace = true }
 tao = "0.36"
-image = "0.25"
 futures = "0.3"
+png = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Graphics_Gdi", "Win32_Foundation"] }
 
 [features]
 default = []
