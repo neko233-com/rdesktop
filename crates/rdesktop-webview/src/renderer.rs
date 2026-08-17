@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use rdesktop_core::config::{AppConfig, WindowConfig};
 use rdesktop_core::ipc::{IpcHandler, IpcMessage};
-use rdesktop_core::renderer::{Renderer, RendererKind};
+use rdesktop_core::renderer::{Renderer, RendererKind, ResizeEdge};
 use rdesktop_core::window::WindowHandle;
 use rdesktop_core::Result;
 
@@ -29,11 +29,50 @@ enum PendingOp {
     SetVisible(u64, bool),
     SendToFrontend(u64, String),
     Close(u64),
+    // Frameless / window control
+    Minimize(u64),
+    Maximize(u64),
+    SetFullscreen(u64, bool),
+    StartDrag(u64),
+    StartResize(u64, tao::window::ResizeDirection),
+    SetDecorations(u64, bool),
+    SetAlwaysOnTop(u64, bool),
 }
 
 /// Shared IPC response queue.
-/// The IPC handler pushes responses here; the event loop drains and evaluates them.
 type IpcResponseQueue = Arc<Mutex<Vec<String>>>;
+
+/// Window control commands from the IPC thread, drained by the event loop.
+type WindowCommandQueue = Arc<Mutex<Vec<WindowCommand>>>;
+
+/// A window control command sent from the IPC handler to the event loop.
+struct WindowCommand {
+    rdesktop_id: u64,
+    action: WindowAction,
+}
+
+enum WindowAction {
+    Minimize,
+    Maximize,
+    Close,
+    StartDrag,
+    StartResize(tao::window::ResizeDirection),
+    SetFullscreen(bool),
+}
+
+/// Convert rdesktop ResizeEdge to tao's ResizeDirection.
+fn to_tao_resize(edge: ResizeEdge) -> tao::window::ResizeDirection {
+    match edge {
+        ResizeEdge::Top => tao::window::ResizeDirection::North,
+        ResizeEdge::Bottom => tao::window::ResizeDirection::South,
+        ResizeEdge::Left => tao::window::ResizeDirection::West,
+        ResizeEdge::Right => tao::window::ResizeDirection::East,
+        ResizeEdge::TopLeft => tao::window::ResizeDirection::NorthWest,
+        ResizeEdge::TopRight => tao::window::ResizeDirection::NorthEast,
+        ResizeEdge::BottomLeft => tao::window::ResizeDirection::SouthWest,
+        ResizeEdge::BottomRight => tao::window::ResizeDirection::SouthEast,
+    }
+}
 
 /// WebView-based renderer using wry + tao.
 ///
@@ -42,15 +81,20 @@ type IpcResponseQueue = Arc<Mutex<Vec<String>>>;
 /// - macOS: WKWebView (WebKit)
 /// - Linux: WebKitGTK
 ///
-/// ## Lifecycle
+/// ## Frameless / Custom Title Bar
 ///
-/// 1. `new()` + `init()` - create renderer
-/// 2. `set_ipc_handler()` - wire up IPC
-/// 3. `create_window()` - queue window creation (returns handle immediately)
-/// 4. `load_url()` / `load_html()` - queue content loading
-/// 5. `run()` - enters event loop, processes all queued operations, blocks until exit
+/// Set `decorations = false` in `WindowConfig` to create a frameless window.
+/// The frontend can use `window.__RDESKTOP_WINDOW__` to control the window:
+///
+/// ```javascript
+/// window.__RDESKTOP_WINDOW__.minimize()
+/// window.__RDESKTOP_WINDOW__.maximize()
+/// window.__RDESKTOP_WINDOW__.close()
+/// window.__RDESKTOP_WINDOW__.startDrag()       // drag from custom title bar
+/// window.__RDESKTOP_WINDOW__.startResize('bottom-right')  // resize from edge
+/// ```
 pub struct WebViewRenderer {
-    config: AppConfig,
+    _config: AppConfig,
     ipc_handler: Option<Arc<dyn IpcHandler>>,
     pending_windows: RefCell<Vec<(u64, WindowConfig)>>,
     pending_ops: RefCell<Vec<PendingOp>>,
@@ -60,7 +104,7 @@ pub struct WebViewRenderer {
 impl WebViewRenderer {
     pub fn new(config: &AppConfig) -> Result<Self> {
         Ok(Self {
-            config: config.clone(),
+            _config: config.clone(),
             ipc_handler: None,
             pending_windows: RefCell::new(Vec::new()),
             pending_ops: RefCell::new(Vec::new()),
@@ -76,7 +120,6 @@ impl WebViewRenderer {
     }
 
     /// JavaScript bridge injected into every WebView.
-    /// Provides `window.__RDESKTOP_INVOKE__(cmd, payload)` for IPC.
     fn bridge_script() -> &'static str {
         r#"
         (function() {
@@ -84,6 +127,7 @@ impl WebViewRenderer {
             window.__RDESKTOP_BRIDGE__ = true;
             window.__RDESKTOP_RESOLVE__ = {};
 
+            // ── IPC Bridge ──────────────────────────────────────
             window.__RDESKTOP_INVOKE__ = function(cmd, payload) {
                 return new Promise(function(resolve, reject) {
                     var id = Math.random().toString(36).slice(2);
@@ -111,8 +155,67 @@ impl WebViewRenderer {
                     console.error('rdesktop IPC error:', e);
                 }
             };
+
+            // ── Window Controls (frameless / custom title bar) ──
+            window.__RDESKTOP_WINDOW__ = {
+                minimize: function() {
+                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'minimize' }));
+                },
+                maximize: function() {
+                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'maximize' }));
+                },
+                close: function() {
+                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'close' }));
+                },
+                startDrag: function() {
+                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'start_drag' }));
+                },
+                startResize: function(edge) {
+                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'start_resize', edge: edge || 'bottom-right' }));
+                },
+                setFullscreen: function(fs) {
+                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'set_fullscreen', value: !!fs }));
+                },
+                isMaximized: false,
+                isFullscreen: false
+            };
         })();
         "#
+    }
+
+    /// Parse a window control message from the IPC handler.
+    /// Returns Some(WindowAction) if it's a window command, None otherwise.
+    fn parse_window_command(msg: &IpcMessage, rdesktop_id: u64) -> Option<WindowCommand> {
+        // Check if the payload has __window__ flag
+        if msg.payload.get("__window__").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let action = match msg.payload["action"].as_str()? {
+                "minimize" => WindowAction::Minimize,
+                "maximize" => WindowAction::Maximize,
+                "close" => WindowAction::Close,
+                "start_drag" => WindowAction::StartDrag,
+                "start_resize" => {
+                    let edge_str = msg.payload["edge"].as_str().unwrap_or("bottom-right");
+                    let dir = match edge_str {
+                        "top" => tao::window::ResizeDirection::North,
+                        "bottom" => tao::window::ResizeDirection::South,
+                        "left" => tao::window::ResizeDirection::West,
+                        "right" => tao::window::ResizeDirection::East,
+                        "top-left" => tao::window::ResizeDirection::NorthWest,
+                        "top-right" => tao::window::ResizeDirection::NorthEast,
+                        "bottom-left" => tao::window::ResizeDirection::SouthWest,
+                        _ => tao::window::ResizeDirection::SouthEast,
+                    };
+                    WindowAction::StartResize(dir)
+                }
+                "set_fullscreen" => {
+                    let val = msg.payload["value"].as_bool().unwrap_or(false);
+                    WindowAction::SetFullscreen(val)
+                }
+                _ => return None,
+            };
+            return Some(WindowCommand { rdesktop_id, action });
+        }
+        None
     }
 }
 
@@ -196,18 +299,87 @@ impl Renderer for WebViewRenderer {
         Ok(())
     }
 
+    // ── Frameless / Window Controls ─────────────────────────────
+
+    fn minimize_window(&self, window: WindowHandle) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::Minimize(window.id()));
+        Ok(())
+    }
+
+    fn maximize_window(&self, window: WindowHandle) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::Maximize(window.id()));
+        Ok(())
+    }
+
+    fn is_maximized(&self, _window: WindowHandle) -> Result<bool> {
+        // This needs to be checked inside the event loop; return false for now.
+        // In practice, the frontend can track this via window state events.
+        Ok(false)
+    }
+
+    fn set_fullscreen(&self, window: WindowHandle, fullscreen: bool) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SetFullscreen(window.id(), fullscreen));
+        Ok(())
+    }
+
+    fn is_fullscreen(&self, _window: WindowHandle) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn start_drag(&self, window: WindowHandle) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::StartDrag(window.id()));
+        Ok(())
+    }
+
+    fn start_resize(&self, window: WindowHandle, edge: ResizeEdge) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::StartResize(window.id(), to_tao_resize(edge)));
+        Ok(())
+    }
+
+    fn set_decorations(&self, window: WindowHandle, decorations: bool) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SetDecorations(window.id(), decorations));
+        Ok(())
+    }
+
+    fn set_always_on_top(&self, window: WindowHandle, always: bool) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SetAlwaysOnTop(window.id(), always));
+        Ok(())
+    }
+
+    // ── Event Loop ──────────────────────────────────────────────
+
     fn run(mut self: Box<Self>) -> Result<()> {
         tracing::info!("Starting WebView event loop");
 
-        let _config = self.config.clone();
         let ipc_handler = self.ipc_handler.take();
         let pending_windows: Vec<(u64, WindowConfig)> =
             self.pending_windows.borrow_mut().drain(..).collect();
         let pending_ops: Vec<PendingOp> = self.pending_ops.borrow_mut().drain(..).collect();
 
-        // Shared queue for IPC responses that need to be sent back to webviews
         let ipc_response_queue: IpcResponseQueue = Arc::new(Mutex::new(Vec::new()));
         let ipc_queue_for_handler = ipc_response_queue.clone();
+
+        // Window command queue for IPC-triggered window operations
+        let window_cmd_queue: WindowCommandQueue = Arc::new(Mutex::new(Vec::new()));
+        let window_cmd_queue_for_ipc = window_cmd_queue.clone();
+
+        // Build a map of rdesktop_id -> first tao_id for the IPC handler
+        // (the IPC handler needs to know which window to operate on)
+        let first_window_id: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
 
         let event_loop = EventLoopBuilder::new().build();
         let mut windows: HashMap<WindowId, WindowEntry> = HashMap::new();
@@ -242,34 +414,40 @@ impl Renderer for WebViewRenderer {
 
                         let tao_id = window.id();
 
-                        // Build WebView with IPC handler
                         let mut builder = WebViewBuilder::new()
                             .with_url("about:blank")
                             .with_devtools(cfg!(debug_assertions))
                             .with_initialization_script(Self::bridge_script());
 
                         // Wire up IPC handler
-                        // wry's IPC handler is Fn(Request<String>) - no return value.
-                        // Responses are sent back via a shared queue that the event loop drains.
                         if let Some(ref handler) = ipc_handler {
                             let handler = handler.clone();
                             let queue = ipc_queue_for_handler.clone();
+                            let win_queue = window_cmd_queue_for_ipc.clone();
+                            let _first_id = first_window_id.clone();
+                            let rd_id = *rdesktop_id;
+
                             builder = builder.with_ipc_handler(
                                 move |req: wry::http::Request<String>| {
                                     let body = req.body();
-                                    match serde_json::from_str::<IpcMessage>(body) {
-                                        Ok(msg) => {
-                                            let response = handler.handle(msg);
-                                            if let Ok(json) = serde_json::to_string(&response) {
-                                                // Queue the response - the event loop will
-                                                // drain and evaluate it on the webview
-                                                if let Ok(mut q) = queue.lock() {
-                                                    q.push(json);
-                                                }
+
+                                    // Try parsing as window command first
+                                    if let Ok(msg) = serde_json::from_str::<IpcMessage>(body) {
+                                        if let Some(cmd) =
+                                            WebViewRenderer::parse_window_command(&msg, rd_id)
+                                        {
+                                            if let Ok(mut q) = win_queue.lock() {
+                                                q.push(cmd);
                                             }
+                                            return;
                                         }
-                                        Err(e) => {
-                                            tracing::warn!("Invalid IPC message: {}", e);
+
+                                        // Regular IPC message
+                                        let response = handler.handle(msg);
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            if let Ok(mut q) = queue.lock() {
+                                                q.push(json);
+                                            }
                                         }
                                     }
                                 },
@@ -288,81 +466,20 @@ impl Renderer for WebViewRenderer {
                         rdesktop_to_tao.insert(*rdesktop_id, tao_id);
                         tao_to_rdesktop.insert(tao_id, *rdesktop_id);
 
+                        if first_window_id.lock().unwrap().is_none() {
+                            *first_window_id.lock().unwrap() = Some(*rdesktop_id);
+                        }
+
                         tracing::info!(rdesktop_id = rdesktop_id, ?tao_id, "Window created");
                     }
 
                     // Process pending operations
                     for op in &pending_ops {
-                        match op {
-                            PendingOp::LoadUrl(rd_id, url) => {
-                                if let Some(tao_id) = rdesktop_to_tao.get(rd_id) {
-                                    if let Some(entry) = windows.get(tao_id) {
-                                        let _ = entry.webview.load_url(url);
-                                    }
-                                }
-                            }
-                            PendingOp::LoadHtml(rd_id, html) => {
-                                if let Some(tao_id) = rdesktop_to_tao.get(rd_id) {
-                                    if let Some(entry) = windows.get(tao_id) {
-                                        let _ = entry.webview.load_html(html);
-                                    }
-                                }
-                            }
-                            PendingOp::EvalScript(rd_id, script) => {
-                                if let Some(tao_id) = rdesktop_to_tao.get(rd_id) {
-                                    if let Some(entry) = windows.get(tao_id) {
-                                        let _ = entry.webview.evaluate_script(script);
-                                    }
-                                }
-                            }
-                            PendingOp::SetTitle(rd_id, title) => {
-                                if let Some(tao_id) = rdesktop_to_tao.get(rd_id) {
-                                    if let Some(entry) = windows.get(tao_id) {
-                                        entry.window.set_title(title);
-                                    }
-                                }
-                            }
-                            PendingOp::SetSize(rd_id, w, h) => {
-                                if let Some(tao_id) = rdesktop_to_tao.get(rd_id) {
-                                    if let Some(entry) = windows.get(tao_id) {
-                                        entry
-                                            .window
-                                            .set_inner_size(tao::dpi::LogicalSize::new(*w, *h));
-                                    }
-                                }
-                            }
-                            PendingOp::SetResizable(rd_id, resizable) => {
-                                if let Some(tao_id) = rdesktop_to_tao.get(rd_id) {
-                                    if let Some(entry) = windows.get(tao_id) {
-                                        entry.window.set_resizable(*resizable);
-                                    }
-                                }
-                            }
-                            PendingOp::SetVisible(rd_id, visible) => {
-                                if let Some(tao_id) = rdesktop_to_tao.get(rd_id) {
-                                    if let Some(entry) = windows.get(tao_id) {
-                                        entry.window.set_visible(*visible);
-                                    }
-                                }
-                            }
-                            PendingOp::SendToFrontend(rd_id, msg) => {
-                                if let Some(tao_id) = rdesktop_to_tao.get(rd_id) {
-                                    if let Some(entry) = windows.get(tao_id) {
-                                        let escaped =
-                                            msg.replace('\\', "\\\\").replace('\'', "\\'");
-                                        let script =
-                                            format!("window.__RDESKTOP_IPC__('{escaped}')");
-                                        let _ = entry.webview.evaluate_script(&script);
-                                    }
-                                }
-                            }
-                            PendingOp::Close(rd_id) => {
-                                if let Some(tao_id) = rdesktop_to_tao.remove(rd_id) {
-                                    tao_to_rdesktop.remove(&tao_id);
-                                    windows.remove(&tao_id);
-                                }
-                            }
-                        }
+                        Self::apply_op(
+                            op,
+                            &windows,
+                            &rdesktop_to_tao,
+                        );
                     }
                 }
 
@@ -411,19 +528,57 @@ impl Renderer for WebViewRenderer {
                     }
                 }
 
-                // On each event, drain the IPC response queue and send responses to webviews
                 Event::MainEventsCleared => {
+                    // Drain IPC response queue
                     let responses: Vec<String> = {
                         let mut queue = ipc_response_queue.lock().unwrap();
                         queue.drain(..).collect()
                     };
                     for json in responses {
-                        // Send to the primary (first) window's webview
                         if let Some(entry) = windows.values().next() {
                             let escaped = json.replace('\\', "\\\\").replace('\'', "\\'");
-                            let script =
-                                format!("window.__RDESKTOP_IPC__('{escaped}')");
+                            let script = format!("window.__RDESKTOP_IPC__('{escaped}')");
                             let _ = entry.webview.evaluate_script(&script);
+                        }
+                    }
+
+                    // Drain window command queue
+                    let commands: Vec<WindowCommand> = {
+                        let mut queue = window_cmd_queue.lock().unwrap();
+                        queue.drain(..).collect()
+                    };
+                    for cmd in commands {
+                        if let Some(tao_id) = rdesktop_to_tao.get(&cmd.rdesktop_id) {
+                            if let Some(entry) = windows.get(tao_id) {
+                                match cmd.action {
+                                    WindowAction::Minimize => {
+                                        entry.window.set_minimized(true);
+                                    }
+                                    WindowAction::Maximize => {
+                                        let is_max = entry.window.is_maximized();
+                                        entry.window.set_maximized(!is_max);
+                                    }
+                                    WindowAction::Close => {
+                                        // Will be handled by CloseRequested
+                                        // For now, just remove the window
+                                    }
+                                    WindowAction::StartDrag => {
+                                        let _ = entry.window.drag_window();
+                                    }
+                                    WindowAction::StartResize(dir) => {
+                                        let _ = entry.window.drag_resize_window(dir);
+                                    }
+                                    WindowAction::SetFullscreen(fs) => {
+                                        if fs {
+                                            entry.window.set_fullscreen(
+                                                Some(tao::window::Fullscreen::Borderless(None)),
+                                            );
+                                        } else {
+                                            entry.window.set_fullscreen(None);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -439,5 +594,106 @@ impl Renderer for WebViewRenderer {
 
     fn kind(&self) -> RendererKind {
         RendererKind::WebView
+    }
+}
+
+impl WebViewRenderer {
+    /// Apply a pending operation to a window.
+    fn apply_op(
+        op: &PendingOp,
+        windows: &HashMap<WindowId, WindowEntry>,
+        rdesktop_to_tao: &HashMap<u64, WindowId>,
+    ) {
+        match op {
+            PendingOp::LoadUrl(rd_id, url) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let _ = entry.webview.load_url(url);
+                }
+            }
+            PendingOp::LoadHtml(rd_id, html) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let _ = entry.webview.load_html(html);
+                }
+            }
+            PendingOp::EvalScript(rd_id, script) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let _ = entry.webview.evaluate_script(script);
+                }
+            }
+            PendingOp::SetTitle(rd_id, title) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_title(title);
+                }
+            }
+            PendingOp::SetSize(rd_id, w, h) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry
+                        .window
+                        .set_inner_size(tao::dpi::LogicalSize::new(*w, *h));
+                }
+            }
+            PendingOp::SetResizable(rd_id, resizable) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_resizable(*resizable);
+                }
+            }
+            PendingOp::SetVisible(rd_id, visible) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_visible(*visible);
+                }
+            }
+            PendingOp::SendToFrontend(rd_id, msg) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let escaped = msg.replace('\\', "\\\\").replace('\'', "\\'");
+                    let script = format!("window.__RDESKTOP_IPC__('{escaped}')");
+                    let _ = entry.webview.evaluate_script(&script);
+                }
+            }
+            PendingOp::Close(_rd_id) => {
+                // Handled by the caller (removes from maps)
+            }
+            PendingOp::Minimize(rd_id) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_minimized(true);
+                }
+            }
+            PendingOp::Maximize(rd_id) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let is_max = entry.window.is_maximized();
+                    entry.window.set_maximized(!is_max);
+                }
+            }
+            PendingOp::SetFullscreen(rd_id, fs) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    if *fs {
+                        entry
+                            .window
+                            .set_fullscreen(Some(tao::window::Fullscreen::Borderless(None)));
+                    } else {
+                        entry.window.set_fullscreen(None);
+                    }
+                }
+            }
+            PendingOp::StartDrag(rd_id) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let _ = entry.window.drag_window();
+                }
+            }
+            PendingOp::StartResize(rd_id, dir) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let _ = entry.window.drag_resize_window(*dir);
+                }
+            }
+            PendingOp::SetDecorations(rd_id, decorations) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_decorations(*decorations);
+                }
+            }
+            PendingOp::SetAlwaysOnTop(rd_id, always) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_always_on_top(*always);
+                }
+            }
+        }
     }
 }

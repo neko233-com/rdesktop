@@ -7,7 +7,7 @@ use crate::window::WindowHandle;
 pub enum RendererKind {
     /// System WebView (WebView2/WebKit)
     WebView,
-    /// Chrome Embedded Framework
+    /// Chrome Embedded (CDP)
     Chrome,
 }
 
@@ -68,9 +68,58 @@ pub trait Renderer {
     /// Close a window.
     fn close_window(&mut self, window: WindowHandle) -> crate::Result<()>;
 
+    // ── Frameless / Custom Title Bar ────────────────────────────────
+
+    /// Minimize the window.
+    fn minimize_window(&self, window: WindowHandle) -> crate::Result<()>;
+
+    /// Toggle maximize/restore.
+    fn maximize_window(&self, window: WindowHandle) -> crate::Result<()>;
+
+    /// Check whether the window is currently maximized.
+    fn is_maximized(&self, window: WindowHandle) -> crate::Result<bool>;
+
+    /// Toggle fullscreen mode.
+    fn set_fullscreen(&self, window: WindowHandle, fullscreen: bool) -> crate::Result<()>;
+
+    /// Check whether the window is currently fullscreen.
+    fn is_fullscreen(&self, window: WindowHandle) -> crate::Result<bool>;
+
+    /// Begin an interactive window drag.
+    ///
+    /// Call this from a `mousedown` handler on a custom title bar element
+    /// to allow the user to drag the window from any region.
+    fn start_drag(&self, window: WindowHandle) -> crate::Result<()>;
+
+    /// Begin an interactive window resize.
+    ///
+    /// `edge` specifies which edge/corner to resize from.
+    fn start_resize(&self, window: WindowHandle, edge: ResizeEdge) -> crate::Result<()>;
+
+    /// Set whether the window has OS decorations (title bar + borders).
+    fn set_decorations(&self, window: WindowHandle, decorations: bool) -> crate::Result<()>;
+
+    /// Set the window's always-on-top state.
+    fn set_always_on_top(&self, window: WindowHandle, always: bool) -> crate::Result<()>;
+
+    // ── Lifecycle ───────────────────────────────────────────────────
+
     /// Run the main event loop. This blocks until the application exits.
     fn run(self: Box<Self>) -> crate::Result<()>;
 
     /// Get the renderer kind.
     fn kind(&self) -> RendererKind;
+}
+
+/// Edge or corner for interactive resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }

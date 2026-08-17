@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>rdesktop App</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+        }
+        .container { text-align: center; padding: 2rem; }
+        h1 { font-size: 3rem; margin-bottom: 1rem; }
+        p { font-size: 1.2rem; opacity: 0.9; margin-bottom: 2rem; }
+        .card {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 2rem;
+            margin: 1rem auto;
+            max-width: 400px;
+        }
+        input {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            margin-right: 8px;
+        }
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 8px;
+            background: #667eea;
+            color: white;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+        button:hover { background: #5a6fd6; }
+        #result { margin-top: 1rem; font-size: 1.1rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Hello rdesktop!</h1>
+        <p>Your app is running.</p>
+        <div class="card">
+            <h2>IPC Demo</h2>
+            <input type="text" id="nameInput" placeholder="Enter your name" />
+            <button onclick="greet()">Greet</button>
+            <div id="result"></div>
+        </div>
+    </div>
+    <script>
+        // rdesktop IPC bridge (works in both browser and native mode)
+        async function invoke(cmd, payload) {
+            // In dev mode (browser), use fetch to Agent API
+            if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                const resp = await fetch('/__rdesktop__/agent/ipc', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: Math.random().toString(36).slice(2), cmd, payload }),
+                });
+                return resp.json();
+            }
+            // In native mode, use the window IPC bridge
+            return new Promise((resolve) => {
+                const id = Math.random().toString(36).slice(2);
+                window.__RDESKTOP_RESOLVE__ = window.__RDESKTOP_RESOLVE__ || {};
+                window.__RDESKTOP_RESOLVE__[id] = resolve;
+                window.ipc.postMessage(JSON.stringify({ id, cmd, payload }));
+            });
+        }
+
+        async function greet() {
+            const name = document.getElementById('nameInput').value || 'World';
+            try {
+                const result = await invoke('greet', { name });
+                document.getElementById('result').textContent = result.data?.message || result.message || 'Done';
+            } catch (e) {
+                document.getElementById('result').textContent = 'Error: ' + e.message;
+            }
+        }
+    </script>
+</body>
+</html>

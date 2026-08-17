@@ -1,0 +1,22 @@
+[app]
+identifier = "com.example.test-app"
+name = "test-app"
+version = "0.1.0"
+
+[renderer]
+kind = "webview"
+
+[window]
+title = "test-app"
+width = 1280
+height = 720
+resizable = true
+
+[dev]
+port = 1420
+agent_mode = true
+hot_reload = true
+
+[bundle]
+windows_installer = "nsis"
+linux_packages = ["appimage"]

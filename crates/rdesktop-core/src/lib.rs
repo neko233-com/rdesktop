@@ -27,5 +27,5 @@ pub use config::{AppConfig, BundleConfig, CommandConfig, DevConfig, RendererConf
 pub use error::{RdesktopError, Result};
 pub use event::Event;
 pub use ipc::{IpcHandler, IpcMessage, IpcResponse};
-pub use renderer::{Renderer, RendererKind};
+pub use renderer::{Renderer, RendererKind, ResizeEdge};
 pub use window::WindowHandle;

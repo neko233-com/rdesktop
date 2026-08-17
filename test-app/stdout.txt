@@ -1,0 +1,12 @@
+rdesktop dev server starting...
+  Frontend: .\frontend
+  Agent API: enabled
+
+[2m2026-08-17T03:34:52.604054Z[0m [32m INFO[0m [2mrdesktop_dev::server[0m[2m:[0m rdesktop dev server starting at http://localhost:1420
+[2m2026-08-17T03:34:52.604246Z[0m [32m INFO[0m [2mrdesktop_dev::server[0m[2m:[0m Agent API available at http://localhost:1420/__rdesktop__/agent/
+[2m2026-08-17T03:34:52.609076Z[0m [32m INFO[0m [2mrdesktop_dev::server[0m[2m:[0m Listening on localhost:1420
+
+Dev server running at http://localhost:1420
+Agent API at http://localhost:1420/__rdesktop__/agent/
+
+Press Ctrl+C to stop.
