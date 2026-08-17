@@ -14,6 +14,18 @@ tracing = { workspace = true }
 raw-window-handle = "0.6"
 dpi = "0.1"
 url = "2"
+tao = { workspace = true }
 
 [features]
 default = []
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+core-graphics = "0.24"

@@ -1,0 +1,19 @@
+[package]
+name = "wallpaper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rdesktop-core = { path = "../../crates/rdesktop-core" }
+rdesktop-webview = { path = "../../crates/rdesktop-webview", optional = true }
+rdesktop-cef = { path = "../../crates/rdesktop-cef", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[features]
+default = ["webview"]
+webview = ["dep:rdesktop-webview"]
+chrome = ["dep:rdesktop-cef"]

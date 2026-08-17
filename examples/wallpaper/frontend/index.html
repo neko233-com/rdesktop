@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>rdesktop Wallpaper</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: transparent;
+  }
+  #gpu-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  /* CSS fallback animated gradient when WebGPU is unavailable */
+  #fallback {
+    position: fixed; inset: 0; display: none;
+    background: linear-gradient(120deg, #0f2027, #203a43, #2c5364);
+    background-size: 400% 400%;
+    animation: drift 18s ease infinite;
+  }
+  @keyframes drift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+  #hint {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    color: rgba(255,255,255,0.85); font: 600 14px/1.4 system-ui, sans-serif;
+    text-align: center; pointer-events: none; mix-blend-mode: overlay;
+  }
+</style>
+</head>
+<body>
+  <canvas id="gpu-canvas"></canvas>
+  <div id="fallback"></div>
+  <div id="hint">rdesktop wallpaper · click-through · WebGPU shader</div>
+<script>
+(async () => {
+  const canvas = document.getElementById('gpu-canvas');
+
+  function fallback() {
+    canvas.style.display = 'none';
+    document.getElementById('fallback').style.display = 'block';
+  }
+
+  if (!navigator.gpu) { fallback(); return; }
+
+  let adapter, device;
+  try {
+    adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) { fallback(); return; }
+    device = await adapter.requestDevice();
+  } catch (e) {
+    console.warn('WebGPU init failed, using CSS fallback:', e);
+    fallback();
+    return;
+  }
+
+  const ctx = canvas.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+
+  const shader = device.createShaderModule({ code: `
+    struct VSOut {
+      @builtin(position) pos: vec4f,
+      @location(0) uv: vec2f,
+    };
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+      var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      var o: VSOut;
+      o.pos = vec4f(p[i], 0.0, 1.0);
+      o.uv = p[i] * 0.5 + 0.5;
+      return o;
+    }
+    struct U { t: vec4f };
+    @group(0) @binding(0) var<uniform> u: U;
+    @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+      let time = u.t.x;
+      let c = uv.xyx;
+      let a = 0.5 + 0.5 * sin(time + c.x * 6.2831 + vec3f(0.0, 2.094, 4.188));
+      let b = 0.5 + 0.5 * sin(time * 0.7 + c.y * 6.2831 + vec3f(1.0, 3.0, 5.0));
+      let col = mix(a, b, 0.5);
+      return vec4f(col, 0.92);
+    }
+  ` });
+
+  const uniformBuf = device.createBuffer({
+    size: 16,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const bindGroupLayout = device.createBindGroupLayout({
+    entries: [{
+      binding: 0,
+      visibility: GPUShaderStage.FRAGMENT,
+      buffer: { type: 'uniform' },
+    }],
+  });
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [{ binding: 0, resource: { buffer: uniformBuf } }],
+  });
+  const pipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+    vertex: { module: shader, entryPoint: 'vs' },
+    fragment: { module: shader, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.floor(window.innerWidth * dpr));
+    canvas.height = Math.max(1, Math.floor(window.innerHeight * dpr));
+    ctx.configure({ device, format, alphaMode: 'premultiplied' });
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const start = performance.now();
+  function frame() {
+    const time = (performance.now() - start) / 1000;
+    device.queue.writeBuffer(uniformBuf, 0, new Float32Array([time, 0, 0, 0]));
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        loadOp: 'clear',
+        storeOp: 'store',
+      }],
+    });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -92,12 +92,18 @@ pub struct RendererConfig {
     /// Which renderer backend to use
     #[serde(default)]
     pub kind: RendererKind,
+
+    /// Enable WebGPU in the web context so the frontend can drive native
+    /// shaders (Wallpaper-Engine-style effects). Passed as Chromium flags.
+    #[serde(default = "default_true")]
+    pub webgpu: bool,
 }
 
 impl Default for RendererConfig {
     fn default() -> Self {
         Self {
             kind: RendererKind::default(),
+            webgpu: true,
         }
     }
 }
@@ -153,6 +159,33 @@ impl Default for DevConfig {
     }
 }
 
+/// Window layer/kind for native mode.
+///
+/// Extends Tauri v2's model with a `Wallpaper` layer (desktop-level,
+/// click-through) and an `Overlay` layer (always-on-top HUD), enabling
+/// Wallpaper-Engine-style and HUD/PIP scenarios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowKind {
+    /// Standard application window (default)
+    #[serde(rename = "normal")]
+    Normal,
+
+    /// Always-on-top overlay (HUD / PIP / floating toolbar)
+    #[serde(rename = "overlay")]
+    Overlay,
+
+    /// Desktop wallpaper layer: sits behind icons, clicks pass through.
+    /// Implies `click_through = true`.
+    #[serde(rename = "wallpaper")]
+    Wallpaper,
+}
+
+impl Default for WindowKind {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
 /// Window configuration for native mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowConfig {
@@ -188,6 +221,15 @@ pub struct WindowConfig {
     #[serde(default = "default_true")]
     pub visible_on_all_workspaces: bool,
 
+    /// Window layer/kind. See [`WindowKind`].
+    #[serde(default)]
+    pub kind: WindowKind,
+
+    /// Click-through: pointer events fall through to whatever is behind the
+    /// window. Required for wallpaper; can also be set explicitly on overlays.
+    #[serde(default)]
+    pub click_through: bool,
+
     /// Minimum window size (width, height)
     pub min_size: Option<(u32, u32)>,
 
@@ -206,6 +248,8 @@ impl Default for WindowConfig {
             transparent: false,
             always_on_top: false,
             visible_on_all_workspaces: true,
+            kind: WindowKind::default(),
+            click_through: false,
             min_size: None,
             max_size: None,
         }

@@ -21,11 +21,13 @@ pub mod event;
 pub mod ipc;
 pub mod renderer;
 pub mod window;
+pub mod window_extras;
 
 pub use app::{App, AppBuilder, WindowContent};
-pub use config::{AppConfig, BundleConfig, CommandConfig, DevConfig, RendererConfig, RendererKind as ConfigRendererKind, WindowConfig};
+pub use config::{AppConfig, BundleConfig, CommandConfig, DevConfig, RendererConfig, RendererKind as ConfigRendererKind, WindowConfig, WindowKind};
 pub use error::{RdesktopError, Result};
 pub use event::Event;
 pub use ipc::{IpcHandler, IpcMessage, IpcResponse};
 pub use renderer::{Renderer, RendererKind, ResizeEdge};
 pub use window::WindowHandle;
+pub use window_extras::apply_window_attributes;

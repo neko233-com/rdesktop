@@ -102,6 +102,17 @@ pub trait Renderer {
     /// Set the window's always-on-top state.
     fn set_always_on_top(&self, window: WindowHandle, always: bool) -> crate::Result<()>;
 
+    /// Enable or disable click-through: when enabled, pointer events fall
+    /// through the window to whatever is behind it (used by wallpaper and
+    /// click-through overlays). Applied at window creation by default; this
+    /// method allows toggling it at runtime where the platform supports it.
+    ///
+    /// Default implementation is a no-op; backends override it to call the
+    /// platform-specific window API.
+    fn set_click_through(&self, _window: WindowHandle, _enabled: bool) -> crate::Result<()> {
+        Ok(())
+    }
+
     // ── Lifecycle ───────────────────────────────────────────────────
 
     /// Run the main event loop. This blocks until the application exits.

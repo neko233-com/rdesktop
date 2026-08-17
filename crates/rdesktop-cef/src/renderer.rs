@@ -400,6 +400,10 @@ impl Renderer for CefRenderer {
                         }
 
                         let tao_id = window.id();
+
+                        // Realize wallpaper/overlay/click-through window attributes.
+                        rdesktop_core::apply_window_attributes(&window, wc);
+
                         tao_windows.insert(tao_id, (window, *rd_id));
                         tracing::info!(rd_id = rd_id, ?tao_id, "Chrome window created");
                     }

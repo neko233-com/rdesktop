@@ -64,6 +64,14 @@ rdesktop-cef
         ├── tao 0.36           (window management)
         ├── tokio              (async runtime for CDP)
         └── png 0.18           (screenshot decode) + windows-sys (GDI blit)
+
+rdesktop-core
+    ├── serde / serde_json / anyhow / thiserror / tracing
+    ├── tao 0.36            (Window handle type for apply_window_attributes)
+    ├── raw-window-handle / dpi / url
+    └── window_extras FFI   (Phase 0: layers + click-through)
+        ├── windows-sys 0.52   (WS_EX_*, WorkerW discovery, GDI)  [cfg(windows)]
+        └── core-graphics 0.24 + objc 0.2  (desktop level, mouse-ignore) [cfg(macos)]
 ```
 
 ## Renderer Abstraction
@@ -283,11 +291,66 @@ installed Chrome/Edge over the Chrome DevTools Protocol (CDP) using
 | macOS 10.15+ | WKWebView | CDP (pending GDI port) | WebView ✅ / Chrome Planned |
 | Linux (X11/Wayland) | WebKitGTK | CDP (pending GDI port) | WebView Planned / Chrome Planned |
 
-## Future Roadmap
+## Deep Desktop Window Layers (Phase 0)
 
-- [ ] Full CEF binary integration
-- [ ] macOS/Linux WebView testing
-- [ ] Code signing support (macOS/Windows)
-- [ ] Auto-update mechanism
-- [ ] Plugin system
-- [ ] Hot reload in dev mode (file watcher + WebSocket)
+rdesktop extends Tauri v2's window model with first-class support for
+Wallpaper-Engine-style and HUD scenarios. The `WindowKind` enum and
+click-through attribute are realized by `rdesktop_core::window_extras`
+(`apply_window_attributes`, called immediately after the tao window is built
+inside each backend's `create_window`).
+
+### WindowKind
+
+| Kind | Behavior | Implies `click_through` |
+|------|----------|--------------------------|
+| `normal` | Standard application window | no |
+| `overlay` | Always-on-top HUD / PIP / floating toolbar | no (set explicitly if needed) |
+| `wallpaper` | Desktop layer: behind icons, pointer falls through | yes |
+
+### `apply_window_attributes` dispatch
+
+- **Windows** (`window_extras::windows`):
+  - *Click-through*: adds `WS_EX_LAYERED | WS_EX_TRANSPARENT` to the extended
+    style via `GetWindowLongPtrW` / `SetWindowLongPtrW`.
+  - *Wallpaper*: sends `0x52C` to `Progman` to force Explorer to (re)create the
+    dedicated wallpaper host, then `EnumWindows` finds the `WorkerW` sibling that
+    does **not** own `SHELLDLL_DefView`; the window is `SetParent`ed to it and
+    pinned with `SetWindowPos(HWND_BOTTOM, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)`.
+- **macOS** (`window_extras::macos`): `setIgnoresMouseEvents:` for click-through;
+  `setLevel:` to `CGWindowLevelForKey(kCGDesktopWindowLevelKey)` + `orderBack:`
+  for wallpaper.
+- **Other platforms**: `tracing::debug!` no-op.
+
+### WebGPU for frontend-native shaders
+
+`RendererConfig.webgpu` (default `true`) enables the frontend to drive native
+shaders. The WebView backend passes `--enable-features=Vulkan,WebGPU
+--enable-unsafe-webgpu` on Windows (via `WebViewBuilderExtWindows`); macOS
+WKWebView and Linux WebKitGTK expose WebGPU through their own paths.
+`examples/wallpaper` renders an animated full-screen WebGPU shader behind the
+desktop, with a CSS-gradient fallback when WebGPU is unavailable.
+
+### Caveats
+
+- The Windows `WorkerW` reparent is a well-established Explorer interop
+  technique; it is robust on Windows 10/11 but can be disturbed by an Explorer
+  restart (handled gracefully — the window simply stays top-most).
+- The macOS path is **not compiled on this Windows dev host** and remains
+  unverified; it requires `objc` 0.2 + `core-graphics` 0.24 and a macOS build.
+- A click-through wallpaper receives no pointer input by design; it must be
+  closed programmatically (e.g. via a tray quit command).
+
+## Roadmap
+
+### Implemented
+- [x] Dual-engine renderer (WebView + Chrome/CEF via CDP)
+- [x] Pull-based IPC bridge (both backends)
+- [x] Phase 0: `WindowKind` (Normal/Overlay/Wallpaper) + click-through + desktop layer + `webgpu` flag
+
+### Planned (deep desktop)
+- [ ] Phase 2: Global mouse/keyboard hook + global hotkeys
+- [ ] Phase 3: Input simulation & device remapping (Logitech G-Hub style)
+- [ ] Phase 4: Media session (SMTC) + HiFi/WASAPI audio engine
+- [ ] Phase 5: Cross-platform alignment; tray / notify / autostart system layer
+- [ ] macOS/Linux WebView + Chrome backend verification
+- [ ] Code signing (macOS/Windows), auto-update, plugin system

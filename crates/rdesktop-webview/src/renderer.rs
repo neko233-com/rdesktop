@@ -12,6 +12,8 @@ use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::window::{Window, WindowBuilder, WindowId};
 use wry::{WebView, WebViewBuilder};
+#[cfg(target_os = "windows")]
+use wry::WebViewBuilderExtWindows;
 
 struct WindowEntry {
     window: Window,
@@ -366,6 +368,7 @@ impl Renderer for WebViewRenderer {
         tracing::info!("Starting WebView event loop");
 
         let ipc_handler = self.ipc_handler.take();
+        let webgpu_enabled = self._config.renderer.webgpu;
         let pending_windows: Vec<(u64, WindowConfig)> =
             self.pending_windows.borrow_mut().drain(..).collect();
         let pending_ops: Vec<PendingOp> = self.pending_ops.borrow_mut().drain(..).collect();
@@ -414,10 +417,29 @@ impl Renderer for WebViewRenderer {
 
                         let tao_id = window.id();
 
+                        // Realize wallpaper/overlay/click-through window attributes.
+                        rdesktop_core::apply_window_attributes(&window, window_config);
+
                         let mut builder = WebViewBuilder::new()
                             .with_url("about:blank")
                             .with_devtools(cfg!(debug_assertions))
                             .with_initialization_script(Self::bridge_script());
+
+                        // Enable WebGPU in the web context when requested, so the
+                        // frontend can drive native shaders (wallpaper effects).
+                        if window_config.transparent {
+                            builder = builder.with_transparent(true);
+                        }
+                        // Enable WebGPU in the web context so the frontend can
+                        // drive native shaders (wallpaper effects). On Windows
+                        // WebView2/Edge needs the feature flag; on macOS WKWebView
+                        // exposes WebGPU natively and on Linux WebKitGTK enables it
+                        // via a different path, so the args are Windows-only.
+                        #[cfg(target_os = "windows")]
+                        if webgpu_enabled {
+                            builder = builder
+                                .with_additional_browser_args("--enable-features=Vulkan,WebGPU --enable-unsafe-webgpu");
+                        }
 
                         // Wire up IPC handler
                         if let Some(ref handler) = ipc_handler {
@@ -536,9 +558,10 @@ impl Renderer for WebViewRenderer {
                     };
                     for json in responses {
                         if let Some(entry) = windows.values().next() {
-                            let escaped = json.replace('\\', "\\\\").replace('\'', "\\'");
-                            let script = format!("window.__RDESKTOP_IPC__('{escaped}')");
-                            let _ = entry.webview.evaluate_script(&script);
+                            if let Ok(js) = serde_json::to_string(&json) {
+                                let script = format!("window.__RDESKTOP_IPC__({js})");
+                                let _ = entry.webview.evaluate_script(&script);
+                            }
                         }
                     }
 
@@ -644,9 +667,10 @@ impl WebViewRenderer {
             }
             PendingOp::SendToFrontend(rd_id, msg) => {
                 if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    let escaped = msg.replace('\\', "\\\\").replace('\'', "\\'");
-                    let script = format!("window.__RDESKTOP_IPC__('{escaped}')");
-                    let _ = entry.webview.evaluate_script(&script);
+                    if let Ok(js) = serde_json::to_string(msg) {
+                        let script = format!("window.__RDESKTOP_IPC__({js})");
+                        let _ = entry.webview.evaluate_script(&script);
+                    }
                 }
             }
             PendingOp::Close(_rd_id) => {
