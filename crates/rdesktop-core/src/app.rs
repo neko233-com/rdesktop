@@ -2,11 +2,20 @@ use crate::config::{AppConfig, WindowConfig};
 use crate::ipc::IpcHandler;
 use crate::renderer::Renderer;
 
+/// Content to load in the main window.
+pub enum WindowContent {
+    /// Load a URL.
+    Url(String),
+    /// Load HTML directly.
+    Html(String),
+}
+
 /// Builder for creating an rdesktop application.
 pub struct AppBuilder {
     config: AppConfig,
     renderer: Option<Box<dyn Renderer>>,
     ipc_handler: Option<Box<dyn IpcHandler>>,
+    content: Option<WindowContent>,
     setup_fn: Option<Box<dyn FnOnce(&mut dyn Renderer) -> crate::Result<()>>>,
 }
 
@@ -17,6 +26,7 @@ impl AppBuilder {
             config,
             renderer: None,
             ipc_handler: None,
+            content: None,
             setup_fn: None,
         }
     }
@@ -33,6 +43,18 @@ impl AppBuilder {
         self
     }
 
+    /// Set the URL to load in the main window.
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.content = Some(WindowContent::Url(url.into()));
+        self
+    }
+
+    /// Set the HTML to load in the main window.
+    pub fn with_html(mut self, html: impl Into<String>) -> Self {
+        self.content = Some(WindowContent::Html(html.into()));
+        self
+    }
+
     /// Set a setup function that runs after renderer initialization.
     pub fn with_setup<F>(mut self, setup: F) -> Self
     where
@@ -46,12 +68,17 @@ impl AppBuilder {
     pub fn build(self) -> crate::Result<App> {
         let renderer = self
             .renderer
-            .ok_or_else(|| crate::RdesktopError::RendererInit("No renderer provided. Use with_renderer().".to_string()))?;
+            .ok_or_else(|| {
+                crate::RdesktopError::RendererInit(
+                    "No renderer provided. Use with_renderer().".to_string(),
+                )
+            })?;
 
         Ok(App {
             config: self.config,
             renderer,
             ipc_handler: self.ipc_handler,
+            content: self.content,
             setup_fn: self.setup_fn,
         })
     }
@@ -62,6 +89,7 @@ pub struct App {
     config: AppConfig,
     renderer: Box<dyn Renderer>,
     ipc_handler: Option<Box<dyn IpcHandler>>,
+    content: Option<WindowContent>,
     setup_fn: Option<Box<dyn FnOnce(&mut dyn Renderer) -> crate::Result<()>>>,
 }
 
@@ -86,14 +114,28 @@ impl App {
             title: self.config.name.clone(),
             ..self.config.window.clone()
         };
-        self.renderer.create_window(&window_config)?;
+        let handle = self.renderer.create_window(&window_config)?;
+
+        // Load content
+        match self.content {
+            Some(WindowContent::Url(url)) => {
+                self.renderer.load_url(handle, &url)?;
+            }
+            Some(WindowContent::Html(html)) => {
+                self.renderer.load_html(handle, &html)?;
+            }
+            None => {
+                // Load about:blank by default
+                self.renderer.load_url(handle, "about:blank")?;
+            }
+        }
 
         // Run setup function if provided
         if let Some(setup) = self.setup_fn {
             setup(self.renderer.as_mut())?;
         }
 
-        // Run the event loop
+        // Run the event loop (blocks until all windows are closed)
         self.renderer.run()
     }
 }

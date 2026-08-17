@@ -54,6 +54,8 @@
             border-radius: 8px;
             font-size: 1rem;
             margin-right: 8px;
+            background: rgba(255,255,255,0.9);
+            color: #333;
         }
         .ipc-demo button {
             padding: 8px 16px;
@@ -63,11 +65,13 @@
             color: white;
             font-size: 1rem;
             cursor: pointer;
+            transition: background 0.2s;
         }
         .ipc-demo button:hover { background: #5a6fd6; }
         #result {
             margin-top: 1rem;
             font-size: 1.1rem;
+            min-height: 1.5em;
         }
     </style>
 </head>
@@ -102,44 +106,33 @@
         document.getElementById('platform').textContent =
             navigator.platform || 'Unknown';
 
-        // IPC bridge
-        window.__RDESKTOP_IPC__ = function(message) {
-            console.log('IPC from backend:', message);
-        };
-
-        // Invoke a backend command
+        // IPC invoke - uses the rdesktop bridge injected by the renderer
+        // In native mode: uses window.ipc.postMessage (wry IPC)
+        // In dev mode (browser): uses fetch to Agent API
         async function invoke(cmd, payload) {
+            if (window.__RDESKTOP_INVOKE__) {
+                // Native mode - use the rdesktop bridge
+                return window.__RDESKTOP_INVOKE__(cmd, payload);
+            }
+            // Dev mode (browser) - use fetch to Agent API
             const id = Math.random().toString(36).slice(2);
-            return new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error('IPC timeout')), 5000);
-                window.__RDESKTOP_IPC_RESOLVE__ = window.__RDESKTOP_IPC_RESOLVE__ || {};
-                window.__RDESKTOP_IPC_RESOLVE__[id] = (response) => {
-                    clearTimeout(timeout);
-                    resolve(response);
-                };
-                // In a real app, this would use the native IPC bridge
-                // window.ipc.postMessage(JSON.stringify({ id, cmd, payload }));
-
-                // Demo: simulate response
-                setTimeout(() => {
-                    if (window.__RDESKTOP_IPC_RESOLVE__[id]) {
-                        window.__RDESKTOP_IPC_RESOLVE__[id]({
-                            id,
-                            success: true,
-                            data: { message: `Hello, ${payload.name || 'World'}! (simulated)` }
-                        });
-                    }
-                }, 100);
+            const resp = await fetch('/__rdesktop__/agent/ipc', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id, cmd, payload }),
             });
+            return resp.json();
         }
 
         async function greet() {
             const name = document.getElementById('nameInput').value || 'World';
+            const resultEl = document.getElementById('result');
+            resultEl.textContent = 'Calling...';
             try {
                 const result = await invoke('greet', { name });
-                document.getElementById('result').textContent = result.data.message;
+                resultEl.textContent = result.data?.message || result.message || 'Done';
             } catch (e) {
-                document.getElementById('result').textContent = 'Error: ' + e.message;
+                resultEl.textContent = 'Error: ' + e.message;
             }
         }
     </script>

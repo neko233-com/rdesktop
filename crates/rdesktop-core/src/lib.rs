@@ -22,8 +22,8 @@ pub mod ipc;
 pub mod renderer;
 pub mod window;
 
-pub use app::{App, AppBuilder};
-pub use config::{AppConfig, BundleConfig, CommandConfig, DevConfig, RendererConfig, WindowConfig};
+pub use app::{App, AppBuilder, WindowContent};
+pub use config::{AppConfig, BundleConfig, CommandConfig, DevConfig, RendererConfig, RendererKind as ConfigRendererKind, WindowConfig};
 pub use error::{RdesktopError, Result};
 pub use event::Event;
 pub use ipc::{IpcHandler, IpcMessage, IpcResponse};

@@ -1,12 +1,15 @@
-use rdesktop_core::config::{AppConfig, RendererConfig, WindowConfig};
+use rdesktop_core::config::{AppConfig, WindowConfig};
 use rdesktop_core::ipc::{IpcMessage, IpcResponse, FnIpcHandler};
+use rdesktop_core::renderer::Renderer;
+use rdesktop_webview::WebViewRenderer;
 
 fn main() -> anyhow::Result<()> {
-    let _config = AppConfig {
+    tracing_subscriber::fmt::init();
+
+    let config = AppConfig {
         identifier: "com.example.hello_world".to_string(),
         name: "Hello rdesktop".to_string(),
         version: "0.1.0".to_string(),
-        renderer: RendererConfig::default(), // WebView by default
         window: WindowConfig {
             title: "Hello rdesktop".to_string(),
             width: 1280,
@@ -17,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Set up IPC handler
-    let _handler = FnIpcHandler::new(|msg: IpcMessage| {
+    let handler = FnIpcHandler::new(|msg: IpcMessage| {
         println!("Received IPC: {} -> {}", msg.cmd, msg.payload);
 
         let response_data = match msg.cmd.as_str() {
@@ -40,24 +43,18 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Build and run the app
-    // In a real implementation, this would use the App builder:
-    //
-    // rdesktop_core::App::builder(config)
-    //     .with_ipc_handler(Box::new(handler))
-    //     .build()?
-    //     .run()?;
+    // Build the renderer
+    let mut renderer = WebViewRenderer::new(&config)?;
+    renderer.init()?;
+    renderer.set_ipc_handler(Box::new(handler));
 
-    println!("rdesktop Hello World example");
-    println!("This demonstrates the dual-engine architecture:");
-    println!("  - Default: WebView (WebView2/WebKit)");
-    println!("  - Optional: Chrome Embedded (pixel-perfect cross-platform)");
-    println!();
-    println!("To run with Chrome renderer:");
-    println!("  cargo run -p hello_world --features chrome");
-    println!();
-    println!("To run in dev mode (browser):");
-    println!("  rdesktop dev");
+    // Create the main window and load the frontend HTML
+    let frontend_html = include_str!("../frontend/index.html");
+    let handle = renderer.create_window(&config.window)?;
+    renderer.load_html(handle, frontend_html)?;
+
+    // Enter the event loop (blocks until all windows are closed)
+    Box::new(renderer).run()?;
 
     Ok(())
 }

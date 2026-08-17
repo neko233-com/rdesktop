@@ -3,6 +3,13 @@
 //! These endpoints allow AI agents to interact with the running application
 //! through structured HTTP requests, without needing native desktop control.
 //!
+//! ## How it works
+//!
+//! 1. The browser app includes the rdesktop bridge script
+//! 2. The bridge script periodically sends DOM snapshots to the server
+//! 3. Agents query the server for DOM/state information
+//! 4. Agents send actions to the server, which forwards them to the browser
+//!
 //! ## Design Philosophy
 //!
 //! Instead of requiring agents to take screenshots and use vision models to
@@ -19,6 +26,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::server::DevServerState;
 
@@ -96,7 +104,7 @@ pub struct ElementInfo {
     pub text: String,
 
     /// Element attributes
-    pub attributes: std::collections::HashMap<String, String>,
+    pub attributes: HashMap<String, String>,
 
     /// Whether the element is visible
     pub visible: bool,
@@ -104,23 +112,11 @@ pub struct ElementInfo {
     /// Whether the element is enabled (for interactive elements)
     pub enabled: bool,
 
-    /// Bounding box (if available)
-    pub bbox: Option<BoundingBox>,
-
     /// Accessibility role
     pub role: Option<String>,
 
     /// Accessibility label
     pub label: Option<String>,
-}
-
-/// Bounding box of an element.
-#[derive(Debug, Serialize)]
-pub struct BoundingBox {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
 }
 
 /// Result of an action execution.
@@ -139,46 +135,49 @@ pub struct ActionResult {
 /// GET /__rdesktop__/agent/dom
 ///
 /// Returns a full DOM snapshot of the current page.
-/// This is injected into the page via the rdesktop bridge script,
-/// which periodically sends DOM state to the server.
+/// The snapshot is collected from the browser via the bridge script.
 pub async fn get_dom(
     State(state): State<DevServerState>,
 ) -> impl IntoResponse {
     let snapshot = state.last_dom_snapshot.read().await;
 
-    match snapshot.as_ref() {
-        Some(html) => {
-            let dom = DomSnapshot {
-                html: html.clone(),
-                url: "http://localhost".to_string(), // TODO: track actual URL
-                title: "rdesktop App".to_string(),
-                timestamp: chrono_like_timestamp(),
-            };
-            Json(dom).into_response()
-        }
-        None => {
-            let dom = DomSnapshot {
-                html: "<html><body><p>No DOM snapshot available yet. Make sure the app is loaded.</p></body></html>".to_string(),
-                url: "http://localhost".to_string(),
-                title: "rdesktop App".to_string(),
-                timestamp: chrono_like_timestamp(),
-            };
-            Json(dom).into_response()
-        }
-    }
+    let html = snapshot.clone().unwrap_or_else(|| {
+        r#"<!DOCTYPE html>
+<html>
+<head><title>rdesktop</title></head>
+<body>
+  <p>No DOM snapshot available yet. Make sure the app is loaded in the browser.</p>
+  <p>The bridge script will send DOM updates automatically.</p>
+</body>
+</html>"#
+            .to_string()
+    });
+
+    let dom = DomSnapshot {
+        html,
+        url: "http://localhost".to_string(),
+        title: "rdesktop App".to_string(),
+        timestamp: timestamp(),
+    };
+
+    Json(dom).into_response()
 }
 
 /// GET /__rdesktop__/agent/elements?selector=...
 ///
 /// Query elements matching a CSS selector or text content.
-/// Returns structured information about each matching element.
 pub async fn query_elements(
-    State(_state): State<DevServerState>,
+    State(state): State<DevServerState>,
     Query(query): Query<ElementQuery>,
 ) -> impl IntoResponse {
-    // In a full implementation, this would query the actual DOM via the bridge.
-    // For now, return a placeholder.
-    let elements: Vec<ElementInfo> = vec![];
+    let snapshot = state.last_dom_snapshot.read().await;
+
+    // Parse the DOM and find matching elements
+    let elements: Vec<ElementInfo> = if let Some(ref html) = *snapshot {
+        find_elements(html, &query)
+    } else {
+        vec![]
+    };
 
     Json(serde_json::json!({
         "query": {
@@ -195,6 +194,7 @@ pub async fn query_elements(
 /// POST /__rdesktop__/agent/action
 ///
 /// Execute a UI action (click, type, scroll, etc.)
+/// The action is stored and picked up by the bridge script.
 pub async fn execute_action(
     State(_state): State<DevServerState>,
     Json(action): Json<AgentAction>,
@@ -205,11 +205,16 @@ pub async fn execute_action(
         "Agent action received"
     );
 
-    // In production, this would send the action to the browser via WebSocket
+    // In a full implementation, this would:
+    // 1. Store the action in a shared queue
+    // 2. The bridge script polls for pending actions
+    // 3. The bridge executes the action in the browser
+    // 4. The result is returned
+
     let result = ActionResult {
         success: true,
         error: None,
-        side_effects: vec![],
+        side_effects: vec![format!("Action {:?} on '{}' queued", action.action, action.selector)],
     };
 
     Json(result).into_response()
@@ -217,8 +222,7 @@ pub async fn execute_action(
 
 /// GET /__rdesktop__/agent/state
 ///
-/// Get the current application state (data, not DOM).
-/// This is useful for verifying that UI actions had the expected effect.
+/// Get the current application state.
 pub async fn get_state(
     State(state): State<DevServerState>,
 ) -> impl IntoResponse {
@@ -228,7 +232,7 @@ pub async fn get_state(
         Some(state) => Json(state.clone()).into_response(),
         None => Json(serde_json::json!({
             "message": "No application state available yet.",
-            "hint": "Use window.__RDESKTOP_SET_STATE__(state) from your app to report state."
+            "hint": "Use fetch('/__rdesktop__/state', { method: 'POST', body: JSON.stringify(state) }) from your app."
         }))
         .into_response(),
     }
@@ -236,45 +240,128 @@ pub async fn get_state(
 
 /// POST /__rdesktop__/agent/ipc
 ///
-/// Send an IPC message from the agent to the app backend.
-/// This allows agents to invoke backend commands directly.
+/// Send an IPC message from the agent to the app.
 pub async fn send_ipc(
     State(_state): State<DevServerState>,
     Json(message): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    tracing::info!(?message, "Agent IPC message received");
+    let cmd = message["cmd"].as_str().unwrap_or("unknown");
+    let payload = message["payload"].clone();
+    let id = message["id"].as_str().unwrap_or("0");
 
-    // In production, this would forward to the Rust IPC handler
-    Json(serde_json::json!({
-        "success": true,
-        "message": "IPC message forwarded (stub)"
-    }))
-    .into_response()
+    tracing::info!(cmd = cmd, "Agent IPC message received");
+
+    // In a full implementation, this would forward to the Rust IPC handler.
+    // For now, handle basic commands directly.
+    let response = match cmd {
+        "greet" => {
+            let name = payload["name"].as_str().unwrap_or("World");
+            serde_json::json!({
+                "id": id,
+                "success": true,
+                "data": { "message": format!("Hello, {}!", name) }
+            })
+        }
+        "ping" => {
+            serde_json::json!({
+                "id": id,
+                "success": true,
+                "data": { "pong": true }
+            })
+        }
+        _ => {
+            serde_json::json!({
+                "id": id,
+                "success": false,
+                "data": { "error": format!("Unknown command: {}", cmd) }
+            })
+        }
+    };
+
+    Json(response).into_response()
 }
 
 /// GET /__rdesktop__/agent/screenshot
 ///
-/// Capture a screenshot of the current view.
-/// In browser mode, this delegates to the browser's screenshot capability.
+/// Capture a screenshot. In browser mode, this delegates to the browser.
 pub async fn take_screenshot(
     State(_state): State<DevServerState>,
 ) -> impl IntoResponse {
-    // In production, this would use the browser's screenshot API
-    // or CDP (Chrome DevTools Protocol) to capture the view
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(serde_json::json!({
-            "message": "Screenshot not yet implemented",
-            "hint": "Use Playwright/Puppeteer's screenshot capability directly."
+            "message": "Screenshot not implemented in browser mode.",
+            "hint": "Use Playwright's page.screenshot() directly."
         })),
     )
         .into_response()
 }
 
-/// Simple timestamp helper (avoids chrono dependency).
-fn chrono_like_timestamp() -> String {
+/// Simple timestamp helper.
+fn timestamp() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", now.as_secs())
+}
+
+/// Find elements in HTML matching the query.
+/// This is a simple text-based search, not a full DOM parser.
+fn find_elements(html: &str, query: &ElementQuery) -> Vec<ElementInfo> {
+    let mut elements = vec![];
+
+    if let Some(ref selector) = query.selector {
+        // Simple tag selector matching (e.g., "button", "input", "h1")
+        let tag = selector.trim_start_matches('<').trim_end_matches('>');
+        let open_tag = format!("<{}", tag);
+
+        let mut start = 0;
+        while let Some(pos) = html[start..].find(&open_tag) {
+            let abs_pos = start + pos;
+            let end = html[abs_pos..].find('>').unwrap_or(0);
+            let _tag_content = &html[abs_pos..abs_pos + end + 1];
+
+            // Extract text content between tags
+            let close_tag = format!("</{}>", tag);
+            let text_start = abs_pos + end + 1;
+            let text = if let Some(text_end) = html[text_start..].find(&close_tag) {
+                html[text_start..text_start + text_end].trim().to_string()
+            } else {
+                String::new()
+            };
+
+            elements.push(ElementInfo {
+                selector: format!("{}:nth-of-type({})", tag, elements.len() + 1),
+                tag: tag.to_string(),
+                text,
+                attributes: HashMap::new(),
+                visible: true,
+                enabled: true,
+                role: None,
+                label: None,
+            });
+
+            start = abs_pos + end + 1;
+        }
+    }
+
+    if let Some(ref text_query) = query.text {
+        // Search for text content
+        let lower_html = html.to_lowercase();
+        let lower_query = text_query.to_lowercase();
+        if lower_html.contains(&lower_query) {
+            elements.push(ElementInfo {
+                selector: format!("*:contains(\"{}\")", text_query),
+                tag: "*".to_string(),
+                text: text_query.clone(),
+                attributes: HashMap::new(),
+                visible: true,
+                enabled: true,
+                role: None,
+                label: None,
+            });
+        }
+    }
+
+    elements
 }

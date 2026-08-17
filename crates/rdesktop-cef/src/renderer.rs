@@ -9,7 +9,7 @@ use rdesktop_core::Result;
 /// This provides cross-platform pixel-perfect rendering by embedding
 /// a full Chromium browser.
 pub struct CefRenderer {
-    config: AppConfig,
+    _config: AppConfig,
     ipc_handler: Option<Box<dyn IpcHandler>>,
     _cef_initialized: bool,
 }
@@ -17,7 +17,7 @@ pub struct CefRenderer {
 impl CefRenderer {
     pub fn new(config: &AppConfig) -> Result<Self> {
         Ok(Self {
-            config: config.clone(),
+            _config: config.clone(),
             ipc_handler: None,
             _cef_initialized: false,
         })

@@ -23,9 +23,13 @@ Thumbs.db
 *.rpm
 *.app/
 
-# CEF binaries (large, downloaded separately)
+# CEF/Chrome binaries (large, downloaded separately)
 cef/
 chromium/
+chrome/
+
+# Bundler output
+target/release/bundle/
 
 # Node (for frontend tooling)
 node_modules/
@@ -37,3 +41,6 @@ dist/
 # Environment
 .env
 .env.local
+
+# mimocode
+.mimocode/

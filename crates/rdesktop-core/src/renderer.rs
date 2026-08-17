@@ -1,4 +1,4 @@
-use crate::config::{RendererConfig, WindowConfig};
+use crate::config::{RendererConfig, RendererKind as ConfigRendererKind, WindowConfig};
 use crate::ipc::IpcHandler;
 use crate::window::WindowHandle;
 
@@ -11,12 +11,18 @@ pub enum RendererKind {
     Chrome,
 }
 
+impl From<&ConfigRendererKind> for RendererKind {
+    fn from(kind: &ConfigRendererKind) -> Self {
+        match kind {
+            ConfigRendererKind::WebView => Self::WebView,
+            ConfigRendererKind::Chrome => Self::Chrome,
+        }
+    }
+}
+
 impl From<&RendererConfig> for RendererKind {
     fn from(config: &RendererConfig) -> Self {
-        match config {
-            RendererConfig::WebView => Self::WebView,
-            RendererConfig::Chrome => Self::Chrome,
-        }
+        Self::from(&config.kind)
     }
 }
 

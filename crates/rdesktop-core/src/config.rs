@@ -68,7 +68,7 @@ impl Default for AppConfig {
 /// - `WebView`: Uses system WebView (WebView2/WebKit). Lightweight (~5MB).
 /// - `Chrome`: Uses Chrome Embedded Framework. Pixel-perfect (~150MB).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RendererConfig {
+pub enum RendererKind {
     /// Use system WebView (WebView2 on Windows, WebKit on macOS/Linux)
     /// Default, lightweight, ~5MB overhead
     #[serde(rename = "webview")]
@@ -80,9 +80,25 @@ pub enum RendererConfig {
     Chrome,
 }
 
-impl Default for RendererConfig {
+impl Default for RendererKind {
     fn default() -> Self {
         Self::WebView
+    }
+}
+
+/// Renderer configuration (deserialized from `[renderer]` section in TOML).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RendererConfig {
+    /// Which renderer backend to use
+    #[serde(default)]
+    pub kind: RendererKind,
+}
+
+impl Default for RendererConfig {
+    fn default() -> Self {
+        Self {
+            kind: RendererKind::default(),
+        }
     }
 }
 
