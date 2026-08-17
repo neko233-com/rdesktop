@@ -101,6 +101,10 @@ pub struct WebViewRenderer {
     pending_windows: RefCell<Vec<(u64, WindowConfig)>>,
     pending_ops: RefCell<Vec<PendingOp>>,
     next_window_id: RefCell<u64>,
+    /// External outbox for native → frontend pushes (e.g. a Node extension
+    /// host asking the UI to show a message or apply an editor edit). Drained
+    /// every frame by the event loop, same as `ipc_response_queue`.
+    outbox: Arc<Mutex<Vec<String>>>,
 }
 
 impl WebViewRenderer {
@@ -111,7 +115,15 @@ impl WebViewRenderer {
             pending_windows: RefCell::new(Vec::new()),
             pending_ops: RefCell::new(Vec::new()),
             next_window_id: RefCell::new(1),
+            outbox: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// Attach an external outbox so other runtimes (e.g. a Node extension
+    /// host) can push messages to the frontend. Each entry is a JSON string
+    /// emitted as `window.__RDESKTOP_IPC__(<json>)`.
+    pub fn set_outbox(&mut self, outbox: Arc<Mutex<Vec<String>>>) {
+        self.outbox = outbox;
     }
 
     fn next_id(&self) -> u64 {
@@ -152,6 +164,9 @@ impl WebViewRenderer {
                     if (data.id && window.__RDESKTOP_RESOLVE__[data.id]) {
                         window.__RDESKTOP_RESOLVE__[data.id](data);
                         delete window.__RDESKTOP_RESOLVE__[data.id];
+                    } else if (window.__RDESKTOP_PUSH__) {
+                        // Unnamed push (e.g. extension host → UI event).
+                        window.__RDESKTOP_PUSH__(data);
                     }
                 } catch (e) {
                     console.error('rdesktop IPC error:', e);
@@ -376,6 +391,9 @@ impl Renderer for WebViewRenderer {
         let ipc_response_queue: IpcResponseQueue = Arc::new(Mutex::new(Vec::new()));
         let ipc_queue_for_handler = ipc_response_queue.clone();
 
+        // External outbox for native → frontend pushes (Node extension host, etc.)
+        let outbox_for_loop = self.outbox.clone();
+
         // Window command queue for IPC-triggered window operations
         let window_cmd_queue: WindowCommandQueue = Arc::new(Mutex::new(Vec::new()));
         let window_cmd_queue_for_ipc = window_cmd_queue.clone();
@@ -557,6 +575,20 @@ impl Renderer for WebViewRenderer {
                         queue.drain(..).collect()
                     };
                     for json in responses {
+                        if let Some(entry) = windows.values().next() {
+                            if let Ok(js) = serde_json::to_string(&json) {
+                                let script = format!("window.__RDESKTOP_IPC__({js})");
+                                let _ = entry.webview.evaluate_script(&script);
+                            }
+                        }
+                    }
+
+                    // Drain external outbox (native → frontend pushes)
+                    let outbox_msgs: Vec<String> = {
+                        let mut queue = outbox_for_loop.lock().unwrap();
+                        queue.drain(..).collect()
+                    };
+                    for json in outbox_msgs {
                         if let Some(entry) = windows.values().next() {
                             if let Ok(js) = serde_json::to_string(&json) {
                                 let script = format!("window.__RDESKTOP_IPC__({js})");

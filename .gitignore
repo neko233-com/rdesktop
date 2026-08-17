@@ -3,6 +3,9 @@
 **/*.rs.bk
 Cargo.lock
 
+# rcode sub-repo (independent git repository living inside this checkout)
+rcode/
+
 # IDE
 .vscode/
 .idea/
