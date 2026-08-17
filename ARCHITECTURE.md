@@ -447,6 +447,75 @@ in the frontend via `window.__RDESKTOP_PUSH__`.
   dev host and require a macOS build to complete.
 - `mouse_move` is off by default — enabling it floods the outbox with move events.
 
+## Input Simulation (Phase 3)
+
+Phase 3 is the *output* counterpart to Phase 2: it **injects** keyboard and mouse
+events into the OS input stream, exactly as if a physical device produced them.
+Together, capture (Phase 2) + simulation (Phase 3) enable device remapping, macros,
+and automation — the "keyboard driver / mouse driver" side of a Logitech G-Hub-style
+tool. The simulator is renderer-agnostic: it lives in `rdesktop-core` and is driven
+from a backend `IpcHandler` (see `examples/input_sim`), so it works identically
+through WebView or Chrome.
+
+### Module layout (`rdesktop-core`)
+
+```
+simulate.rs     Platform-agnostic InputSimulator + enum dispatch
+  └─ InputSimulator { new, press_key, release_key, tap_key, tap_combo,
+                      type_text, move_mouse, press_mouse, release_mouse,
+                      click, scroll }
+
+#[cfg(windows)]  simulate_win.rs   (real implementation — SendInput)
+#[cfg(macos)]    simulate_mac.rs    (CGEvent stub — returns UnsupportedPlatform)
+```
+
+### Windows implementation (`simulate_win.rs`)
+
+- One `SendInput` batch per call injects synthetic `INPUT` events through the same
+  path real hardware uses, so target apps receive them normally (no hook windows
+  needed). `SendInput` is the correct primitive for *output*, vs. the
+  `WH_*_LL` *capture* hooks in Phase 2.
+- **Keyboard**: `KEYBDINPUT` with the resolved `wVk` + `MapVirtualKeyW(…,
+  MAPVK_VK_TO_VSC)` scan code for ordinary keys; `KEYEVENTF_UNICODE` (scan holds the
+  UTF-16 code unit, `wVk = 0`) for `type_text` so any character — including
+  non-ASCII — types correctly.
+- **Mouse**: `MOUSEINPUT` with `MOUSEEVENTF_MOVE` (relative) or
+  `MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE` (screen coords normalized to the
+  `0..65535` virtual-screen range via `GetSystemMetrics(SM_CX/YVIRTUALSCREEN)`);
+  button down/up via `MOUSEEVENTF_LEFT/RIGHT/MIDDLE*DOWN|UP`; X1/X2 via
+  `MOUSEEVENTF_XDOWN|XUP` with `mouseData = XBUTTON1|XBUTTON2`; wheel via
+  `MOUSEEVENTF_WHEEL` with the delta in the high word of `mouseData` (signed).
+- `Key` ↔ `VIRTUAL_KEY` uses the same `key_to_vk` map as the hotkey parser
+  (`crate::hotkeys_win::key_to_vk`), keeping capture and simulation consistent.
+
+### Frontend contract (example)
+
+The `examples/input_sim` frontend calls backend IPC commands that map 1:1 to the
+simulator:
+
+```json
+{ "cmd": "simulate.text",   "payload": { "text": "hello 世界" } }
+{ "cmd": "simulate.key",    "payload": { "key": "Enter" } }
+{ "cmd": "simulate.combo",  "payload": { "keys": ["Control", "KeyC"] } }
+{ "cmd": "simulate.click",  "payload": { "button": "left" } }
+{ "cmd": "simulate.move",   "payload": { "x": 960, "y": 540, "absolute": true } }
+{ "cmd": "simulate.scroll", "payload": { "delta": 120 } }
+```
+
+The `IpcHandler` returns a standard `IpcResponse` (`{ id, success, data }`) — no
+separate outbox push, because simulation is request/response, not a stream.
+
+### Caveats
+
+- `InputSimulator::new()` returns `UnsupportedPlatform` off Windows/macOS. The
+  macOS `CGEvent` implementation (`simulate_mac.rs`) is a **stub** and is not
+  compiled/verified on this Windows host; it needs `CGEventCreateKeyboardEvent` /
+  `CGEventCreateMouseEvent` posted to `kCGHIDEventTap` and a real macOS build.
+- Injected input is subject to the foreground-lock/UAC rules: events generally land
+  in the foreground window. For elevation-sensitive targets, run the app elevated.
+- `type_text` emits one Unicode key-down/up pair per `char`; it does not auto-apply
+  IME composition — by design, it is the lowest-common-denominator injection path.
+
 ## Roadmap
 
 ### Implemented
@@ -455,10 +524,11 @@ in the frontend via `window.__RDESKTOP_PUSH__`.
 - [x] Phase 0: `WindowKind` (Normal/Overlay/Wallpaper) + click-through + desktop layer + `webgpu` flag
 - [x] Phase 1: Node.js extension host (rcode PoC) + native → frontend Outbox push
 - [x] Phase 2: Global mouse/keyboard hook + global hotkeys (Windows; macOS stub)
+- [x] Phase 3: Input simulation & device remapping (Windows `SendInput`; macOS stub)
 
 ### Planned (deep desktop)
 - [ ] Phase 2 (macOS): complete `CGEventTap` hotkey + input impls; Linux X11/Wayland
-- [ ] Phase 3: Input simulation & device remapping (Logitech G-Hub style)
+- [ ] Phase 3 (macOS): complete `CGEvent` input simulation
 - [ ] Phase 4: Media session (SMTC) + HiFi/WASAPI audio engine
 - [ ] Phase 5: Cross-platform alignment; tray / notify / autostart system layer
 - [ ] macOS/Linux WebView + Chrome backend verification

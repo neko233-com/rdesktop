@@ -21,6 +21,7 @@ pub mod event;
 pub mod global;
 pub mod hotkeys;
 pub mod input;
+pub mod simulate;
 pub mod ipc;
 pub mod renderer;
 pub mod window;
@@ -34,6 +35,10 @@ pub mod hotkeys_mac;
 pub mod input_win;
 #[cfg(target_os = "macos")]
 pub mod input_mac;
+#[cfg(windows)]
+pub mod simulate_win;
+#[cfg(target_os = "macos")]
+pub mod simulate_mac;
 
 pub use app::{App, AppBuilder, WindowContent};
 pub use config::{AppConfig, BundleConfig, CommandConfig, DevConfig, GlobalInputConfig, HotkeyConfig, RendererConfig, RendererKind as ConfigRendererKind, WindowConfig, WindowKind};
@@ -42,6 +47,7 @@ pub use event::Event;
 pub use global::{Outbox, PushHandler};
 pub use hotkeys::{Hotkey, HotkeyHandler, HotkeyManager, Key, Modifiers};
 pub use input::{GlobalInput, GlobalInputEvent, GlobalInputHandler, KeyState, MouseButton};
+pub use simulate::InputSimulator;
 pub use ipc::{IpcHandler, IpcMessage, IpcResponse};
 pub use renderer::{Renderer, RendererKind, ResizeEdge};
 pub use window::WindowHandle;

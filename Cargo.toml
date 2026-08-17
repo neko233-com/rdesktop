@@ -10,6 +10,7 @@ members = [
     "examples/hello_world",
     "examples/wallpaper",
     "examples/global_hotkey",
+    "examples/input_sim",
 ]
 
 [workspace.package]

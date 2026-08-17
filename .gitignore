@@ -1,10 +1,16 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is committed on purpose: this workspace ships binary apps
+# (rdesktop-cli, rdesktop-dev, the examples) and needs reproducible,
+# lock-step builds across machines. Remove this only if the repo becomes a
+# pure library with no binary targets.
 
 # rcode sub-repo (independent git repository living inside this checkout)
 rcode/
+
+# WorkBuddy local agent data (project memory, automations, skills, caches)
+.workbuddy/
 
 # IDE
 .vscode/

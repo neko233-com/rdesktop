@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>rdesktop — Input Simulation</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #0d1117; color: #e6edf3; padding: 24px;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .hint { color: #8b949e; font-size: 13px; margin-bottom: 18px; line-height: 1.5; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .panel {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px;
+  }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+    color: #58a6ff; margin: 0 0 12px; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  button {
+    background: #21262d; border: 1px solid #30363d; border-bottom-width: 2px;
+    color: #e6edf3; border-radius: 6px; padding: 8px 12px; font: inherit; font-size: 12px;
+    cursor: pointer;
+  }
+  button:hover { background: #2d333b; }
+  button:active { transform: translateY(1px); }
+  input[type="text"] {
+    width: 100%; margin-top: 8px; background: #0d1117; border: 1px solid #30363d;
+    border-radius: 6px; color: #e6edf3; padding: 8px; font: inherit; font-size: 12px;
+  }
+  #log {
+    grid-column: 1 / -1; background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 12px; height: 220px; overflow-y: auto; font-size: 12px; line-height: 1.5;
+  }
+  .row { padding: 4px 6px; border-bottom: 1px solid #21262d; white-space: pre-wrap; word-break: break-all; }
+  .row .cmd { color: #7ee787; }
+  .row .ts { color: #6e7681; margin-right: 8px; }
+  .row .err { color: #ff7b72; }
+</style>
+</head>
+<body>
+  <h1>rdesktop — Input Simulation</h1>
+  <div class="hint">
+    Phase 3: system-wide <b>input injection</b> (the "keyboard/mouse driver" side).
+    Focus another window (e.g. Notepad) first, then click a button — the synthetic
+    key/mouse events are delivered to whatever window is in front, exactly like real
+    hardware input.
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Keyboard</h2>
+      <div class="btns">
+        <button onclick="run('simulate.text', {text: text.value || 'Hello from rdesktop 🦀'})">Type text</button>
+        <button onclick="run('simulate.key', {key: 'a'})">Tap A</button>
+        <button onclick="run('simulate.combo', {keys: ['ctrl','c']})">Ctrl+C</button>
+        <button onclick="run('simulate.combo', {keys: ['ctrl','v']})">Ctrl+V</button>
+        <button onclick="run('simulate.key', {key: 'F5'})">F5</button>
+      </div>
+      <input id="text" type="text" placeholder="text to type…" value="Hello from rdesktop" />
+    </div>
+
+    <div class="panel">
+      <h2>Mouse</h2>
+      <div class="btns">
+        <button onclick="run('simulate.click', {button: 'left'})">Click left</button>
+        <button onclick="run('simulate.click', {button: 'right'})">Click right</button>
+        <button onclick="run('simulate.click', {button: 'middle'})">Click middle</button>
+        <button onclick="run('simulate.move', {x: 400, y: 300, absolute: true})">Move →(400,300)</button>
+        <button onclick="run('simulate.scroll', {delta: 120})">Scroll ↓</button>
+        <button onclick="run('simulate.scroll', {delta: -120})">Scroll ↑</button>
+      </div>
+    </div>
+
+    <div id="log"><div class="row">ready — synthetic input will be logged here.</div></div>
+  </div>
+
+<script>
+  function invoke(cmd, payload) {
+    return new Promise(function (resolve) {
+      var id = Math.random().toString(36).slice(2);
+      window.__RDESKTOP_RESOLVE__[id] = resolve;
+      window.__RDESKTOP_INVOKE__(cmd, payload);
+    });
+  }
+
+  async function run(cmd, payload) {
+    var r;
+    try { r = await invoke(cmd, payload); }
+    catch (e) { r = { success: false, data: { error: String(e) } }; }
+    var summary = r.success
+      ? JSON.stringify(r.data)
+      : (r.data && r.data.error ? r.data.error : "failed");
+    var cls = r.success ? "cmd" : "err";
+    append(cmd + " → " + summary, cls);
+  }
+
+  function append(text, cls) {
+    var box = document.getElementById("log");
+    var placeholder = box.querySelector(".row");
+    if (placeholder && /ready/i.test(placeholder.textContent)) box.innerHTML = "";
+    var row = document.createElement("div");
+    row.className = "row";
+    var ts = new Date().toLocaleTimeString();
+    row.innerHTML = '<span class="ts">' + ts + '</span><span class="' + cls + '">' +
+      escapeHtml(text) + "</span>";
+    box.appendChild(row);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c];
+    });
+  }
+</script>
+</body>
+</html>
