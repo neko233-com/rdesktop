@@ -271,24 +271,36 @@ impl WebViewRenderer {
             };
 
             // ── Window Controls (frameless / custom title bar) ──
+            var postWindowCommand = function(action, extra) {
+                if (!window.ipc || !window.ipc.postMessage) return;
+                var payload = extra || {};
+                payload.__window__ = true;
+                payload.action = action;
+                window.ipc.postMessage(JSON.stringify({
+                    id: 'window-' + Math.random().toString(36).slice(2),
+                    cmd: 'rdesktop.window',
+                    payload: payload
+                }));
+            };
+
             window.__RDESKTOP_WINDOW__ = {
                 minimize: function() {
-                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'minimize' }));
+                    postWindowCommand('minimize');
                 },
                 maximize: function() {
-                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'maximize' }));
+                    postWindowCommand('maximize');
                 },
                 close: function() {
-                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'close' }));
+                    postWindowCommand('close');
                 },
                 startDrag: function() {
-                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'start_drag' }));
+                    postWindowCommand('start_drag');
                 },
                 startResize: function(edge) {
-                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'start_resize', edge: edge || 'bottom-right' }));
+                    postWindowCommand('start_resize', { edge: edge || 'bottom-right' });
                 },
                 setFullscreen: function(fs) {
-                    window.ipc && window.ipc.postMessage(JSON.stringify({ __window__: true, action: 'set_fullscreen', value: !!fs }));
+                    postWindowCommand('set_fullscreen', { value: !!fs });
                 },
                 isMaximized: false,
                 isFullscreen: false
@@ -297,23 +309,25 @@ impl WebViewRenderer {
         "#
     }
 
-    /// Parse a window control message from the IPC handler.
-    /// Returns Some(WindowAction) if it's a window command, None otherwise.
-    fn parse_window_command(msg: &IpcMessage, rdesktop_id: u64) -> Option<WindowCommand> {
+    /// Parse a window control payload from the IPC handler.
+    /// Returns Some(WindowCommand) if it's a window command, None otherwise.
+    fn parse_window_payload(
+        payload: &serde_json::Value,
+        rdesktop_id: u64,
+    ) -> Option<WindowCommand> {
         // Check if the payload has __window__ flag
-        if msg
-            .payload
+        if payload
             .get("__window__")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            let action = match msg.payload["action"].as_str()? {
+            let action = match payload["action"].as_str()? {
                 "minimize" => WindowAction::Minimize,
                 "maximize" => WindowAction::Maximize,
                 "close" => WindowAction::Close,
                 "start_drag" => WindowAction::StartDrag,
                 "start_resize" => {
-                    let edge_str = msg.payload["edge"].as_str().unwrap_or("bottom-right");
+                    let edge_str = payload["edge"].as_str().unwrap_or("bottom-right");
                     let dir = match edge_str {
                         "top" => tao::window::ResizeDirection::North,
                         "bottom" => tao::window::ResizeDirection::South,
@@ -327,7 +341,7 @@ impl WebViewRenderer {
                     WindowAction::StartResize(dir)
                 }
                 "set_fullscreen" => {
-                    let val = msg.payload["value"].as_bool().unwrap_or(false);
+                    let val = payload["value"].as_bool().unwrap_or(false);
                     WindowAction::SetFullscreen(val)
                 }
                 _ => return None,
@@ -338,6 +352,46 @@ impl WebViewRenderer {
             });
         }
         None
+    }
+
+    fn parse_window_command(msg: &IpcMessage, rdesktop_id: u64) -> Option<WindowCommand> {
+        Self::parse_window_payload(&msg.payload, rdesktop_id)
+    }
+
+    fn parse_legacy_window_command(
+        raw: &serde_json::Value,
+        rdesktop_id: u64,
+    ) -> Option<WindowCommand> {
+        Self::parse_window_payload(raw, rdesktop_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_formal_window_command_envelope() {
+        let message = IpcMessage {
+            id: "window-test".to_string(),
+            cmd: "rdesktop.window".to_string(),
+            payload: serde_json::json!({
+                "__window__": true,
+                "action": "close"
+            }),
+        };
+
+        assert!(WebViewRenderer::parse_window_command(&message, 1).is_some());
+    }
+
+    #[test]
+    fn parses_legacy_top_level_window_command() {
+        let raw = serde_json::json!({
+            "__window__": true,
+            "action": "minimize"
+        });
+
+        assert!(WebViewRenderer::parse_legacy_window_command(&raw, 1).is_some());
     }
 }
 
@@ -623,10 +677,14 @@ impl Renderer for WebViewRenderer {
                                 builder.with_ipc_handler(move |req: wry::http::Request<String>| {
                                     let body = req.body();
 
-                                    // Try parsing as window command first
-                                    if let Ok(msg) = serde_json::from_str::<IpcMessage>(body) {
+                                    // Parse the JSON once so both the formal IPC envelope and
+                                    // legacy top-level window commands remain supported.
+                                    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(body)
+                                    {
                                         if let Some(cmd) =
-                                            WebViewRenderer::parse_window_command(&msg, rd_id)
+                                            WebViewRenderer::parse_legacy_window_command(
+                                                &raw, rd_id,
+                                            )
                                         {
                                             if let Ok(mut q) = win_queue.lock() {
                                                 q.push(cmd);
@@ -635,11 +693,21 @@ impl Renderer for WebViewRenderer {
                                             return;
                                         }
 
-                                        // Regular IPC message
-                                        let response = handler.handle(msg);
-                                        if let Ok(json) = serde_json::to_string(&response) {
-                                            if let Ok(mut q) = queue.lock() {
-                                                q.push(json);
+                                        if let Ok(msg) = serde_json::from_value::<IpcMessage>(raw) {
+                                            // Formal window command or regular IPC message.
+                                            if let Some(cmd) =
+                                                WebViewRenderer::parse_window_command(&msg, rd_id)
+                                            {
+                                                if let Ok(mut q) = win_queue.lock() {
+                                                    q.push(cmd);
+                                                }
+                                            } else {
+                                                let response = handler.handle(msg);
+                                                if let Ok(json) = serde_json::to_string(&response) {
+                                                    if let Ok(mut q) = queue.lock() {
+                                                        q.push(json);
+                                                    }
+                                                }
                                             }
                                             let _ = wake_proxy.send_event(());
                                         }
