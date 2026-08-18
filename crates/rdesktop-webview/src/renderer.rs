@@ -544,6 +544,7 @@ impl Renderer for WebViewRenderer {
         let first_window_id: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
 
         let event_loop = EventLoopBuilder::new().build();
+        let event_loop_proxy = event_loop.create_proxy();
         let mut windows: HashMap<WindowId, WindowEntry> = HashMap::new();
         let mut rdesktop_to_tao: HashMap<u64, WindowId> = HashMap::new();
         let mut tao_to_rdesktop: HashMap<WindowId, u64> = HashMap::new();
@@ -553,6 +554,7 @@ impl Renderer for WebViewRenderer {
 
             match event {
                 Event::NewEvents(StartCause::Init) => {
+                    let event_loop_proxy = event_loop_proxy.clone();
                     // Create all pending windows
                     for (rdesktop_id, window_config) in &pending_windows {
                         let window = match WindowBuilder::new()
@@ -613,6 +615,7 @@ impl Renderer for WebViewRenderer {
                             let handler = handler.clone();
                             let queue = ipc_queue_for_handler.clone();
                             let win_queue = window_cmd_queue_for_ipc.clone();
+                            let wake_proxy = event_loop_proxy.clone();
                             let _first_id = first_window_id.clone();
                             let rd_id = *rdesktop_id;
 
@@ -628,6 +631,7 @@ impl Renderer for WebViewRenderer {
                                             if let Ok(mut q) = win_queue.lock() {
                                                 q.push(cmd);
                                             }
+                                            let _ = wake_proxy.send_event(());
                                             return;
                                         }
 
@@ -637,6 +641,7 @@ impl Renderer for WebViewRenderer {
                                             if let Ok(mut q) = queue.lock() {
                                                 q.push(json);
                                             }
+                                            let _ = wake_proxy.send_event(());
                                         }
                                     }
                                 });
