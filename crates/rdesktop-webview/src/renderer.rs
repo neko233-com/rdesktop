@@ -616,8 +616,8 @@ impl Renderer for WebViewRenderer {
                             let _first_id = first_window_id.clone();
                             let rd_id = *rdesktop_id;
 
-                            builder = builder.with_ipc_handler(
-                                move |req: wry::http::Request<String>| {
+                            builder =
+                                builder.with_ipc_handler(move |req: wry::http::Request<String>| {
                                     let body = req.body();
 
                                     // Try parsing as window command first
@@ -758,8 +758,7 @@ impl Renderer for WebViewRenderer {
                                         entry.window.set_maximized(!is_max);
                                     }
                                     WindowAction::Close => {
-                                        // Will be handled by CloseRequested
-                                        // For now, just remove the window
+                                        *control_flow = ControlFlow::Exit;
                                     }
                                     WindowAction::StartDrag => {
                                         let _ = entry.window.drag_window();
@@ -769,9 +768,9 @@ impl Renderer for WebViewRenderer {
                                     }
                                     WindowAction::SetFullscreen(fs) => {
                                         if fs {
-                                            entry.window.set_fullscreen(
-                                                Some(tao::window::Fullscreen::Borderless(None)),
-                                            );
+                                            entry.window.set_fullscreen(Some(
+                                                tao::window::Fullscreen::Borderless(None),
+                                            ));
                                         } else {
                                             entry.window.set_fullscreen(None);
                                         }
