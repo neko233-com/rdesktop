@@ -199,10 +199,16 @@ impl WebViewRenderer {
     /// rules. Serving the built frontend through a framework-owned protocol
     /// gives the page a stable origin on every desktop backend.
     pub fn set_asset_root(&mut self, root: impl Into<PathBuf>) -> Result<()> {
-        let root = root.into();
+        let requested_root = root.into();
+        let root = std::fs::canonicalize(&requested_root).map_err(|error| {
+            RdesktopError::Config(format!(
+                "asset root is not accessible ({}): {error}",
+                requested_root.display()
+            ))
+        })?;
         if !root.is_dir() {
             return Err(RdesktopError::Config(format!(
-                "asset root does not exist: {}",
+                "asset root is not a directory: {}",
                 root.display()
             )));
         }
