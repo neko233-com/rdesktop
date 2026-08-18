@@ -44,6 +44,24 @@ pub trait Renderer {
     /// Load HTML content directly.
     fn load_html(&self, window: WindowHandle, html: &str) -> crate::Result<()>;
 
+    /// Load HTML content with a document base URL for relative assets.
+    ///
+    /// WebView backends commonly implement `load_html` with an in-memory
+    /// document (`NavigateToString` on WebView2). Such documents do not have
+    /// a useful filesystem base, so relative Vite assets like
+    /// `./assets/index.js` fail to load. This helper injects a `<base>` tag
+    /// before delegating to the backend and keeps local-first renderers
+    /// portable across WebView2, WKWebView, and WebKitGTK.
+    fn load_html_with_base_url(
+        &self,
+        window: WindowHandle,
+        html: &str,
+        base_url: &str,
+    ) -> crate::Result<()> {
+        let html_with_base = html_with_base_url(html, base_url);
+        self.load_html(window, &html_with_base)
+    }
+
     /// Execute JavaScript in the specified window.
     fn eval_script(&self, window: WindowHandle, script: &str) -> crate::Result<()>;
 
@@ -120,6 +138,59 @@ pub trait Renderer {
 
     /// Get the renderer kind.
     fn kind(&self) -> RendererKind;
+}
+
+/// Add a document base URL while preserving a caller-provided base tag.
+fn html_with_base_url(html: &str, base_url: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    if lower.contains("<base ") || lower.contains("<base>") {
+        return html.to_string();
+    }
+
+    let escaped_base = base_url
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let normalized_base = if escaped_base.ends_with('/') {
+        escaped_base
+    } else {
+        format!("{escaped_base}/")
+    };
+    let base_tag = format!(r#"<base href="{normalized_base}">"#);
+
+    if let Some(head_start) = lower.find("<head") {
+        if let Some(tag_end) = html[head_start..].find('>') {
+            let insert_at = head_start + tag_end + 1;
+            let mut output = String::with_capacity(html.len() + base_tag.len() + 1);
+            output.push_str(&html[..insert_at]);
+            output.push('\n');
+            output.push_str(&base_tag);
+            output.push_str(&html[insert_at..]);
+            return output;
+        }
+    }
+
+    format!("{base_tag}\n{html}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::html_with_base_url;
+
+    #[test]
+    fn injects_base_into_head() {
+        let html = "<!doctype html><html><head><title>Test</title></head></html>";
+        let result = html_with_base_url(html, "file:///C:/app/frontend");
+        assert!(result.contains(r#"<base href="file:///C:/app/frontend/">"#));
+        assert!(result.contains("<head>\n<base"));
+    }
+
+    #[test]
+    fn preserves_existing_base() {
+        let html = r#"<head><base href="custom://app/"></head>"#;
+        assert_eq!(html_with_base_url(html, "file:///ignored"), html);
+    }
 }
 
 /// Edge or corner for interactive resize.

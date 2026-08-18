@@ -1,23 +1,94 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rdesktop_core::config::{AppConfig, WindowConfig};
 use rdesktop_core::ipc::{IpcHandler, IpcMessage};
 use rdesktop_core::renderer::{Renderer, RendererKind, ResizeEdge};
 use rdesktop_core::window::WindowHandle;
-use rdesktop_core::Result;
+use rdesktop_core::{RdesktopError, Result};
 
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::window::{Window, WindowBuilder, WindowId};
-use wry::{WebView, WebViewBuilder};
+use wry::http::{Request, Response};
 #[cfg(target_os = "windows")]
 use wry::WebViewBuilderExtWindows;
+use wry::{WebView, WebViewBuilder};
 
 struct WindowEntry {
     window: Window,
     webview: WebView,
+}
+
+fn serve_asset(root: &Path, request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
+    let request_path = request.uri().path().trim_start_matches('/');
+    let request_path = percent_encoding::percent_decode_str(request_path).decode_utf8_lossy();
+    let relative = Path::new(request_path.as_ref());
+
+    let invalid_path = relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    });
+    if invalid_path {
+        return asset_response(403, "text/plain; charset=utf-8", b"forbidden".to_vec());
+    }
+
+    let relative = if request_path.is_empty() {
+        Path::new("index.html")
+    } else {
+        relative
+    };
+    let path = root.join(relative);
+    match fs::read(&path) {
+        Ok(bytes) => asset_response(200, content_type(&path), bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            asset_response(404, "text/plain; charset=utf-8", b"not found".to_vec())
+        }
+        Err(error) => {
+            tracing::error!(path = %path.display(), %error, "Failed to serve native asset");
+            asset_response(
+                500,
+                "text/plain; charset=utf-8",
+                b"asset read failed".to_vec(),
+            )
+        }
+    }
+}
+
+fn asset_response(status: u16, content_type: &str, body: Vec<u8>) -> Response<Cow<'static, [u8]>> {
+    Response::builder()
+        .status(status)
+        .header("Content-Type", content_type)
+        .header("Cache-Control", "no-cache")
+        .body(Cow::Owned(body))
+        .expect("valid native asset response")
+}
+
+fn content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+    {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "svg" => "image/svg+xml",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Pending operation queued before the event loop starts.
@@ -101,6 +172,7 @@ pub struct WebViewRenderer {
     pending_windows: RefCell<Vec<(u64, WindowConfig)>>,
     pending_ops: RefCell<Vec<PendingOp>>,
     next_window_id: RefCell<u64>,
+    asset_root: Option<PathBuf>,
     /// External outbox for native → frontend pushes (e.g. a Node extension
     /// host asking the UI to show a message or apply an editor edit). Drained
     /// every frame by the event loop, same as `ipc_response_queue`.
@@ -115,8 +187,27 @@ impl WebViewRenderer {
             pending_windows: RefCell::new(Vec::new()),
             pending_ops: RefCell::new(Vec::new()),
             next_window_id: RefCell::new(1),
+            asset_root: None,
             outbox: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// Register a local directory as the renderer's `rdesktop://` asset root.
+    ///
+    /// Native WebViews cannot reliably load Vite module assets from
+    /// `file://` or `NavigateToString()` because of origin and module-CORS
+    /// rules. Serving the built frontend through a framework-owned protocol
+    /// gives the page a stable origin on every desktop backend.
+    pub fn set_asset_root(&mut self, root: impl Into<PathBuf>) -> Result<()> {
+        let root = root.into();
+        if !root.is_dir() {
+            return Err(RdesktopError::Config(format!(
+                "asset root does not exist: {}",
+                root.display()
+            )));
+        }
+        self.asset_root = Some(root);
+        Ok(())
     }
 
     /// Attach an external outbox so other runtimes (e.g. a Node extension
@@ -204,7 +295,12 @@ impl WebViewRenderer {
     /// Returns Some(WindowAction) if it's a window command, None otherwise.
     fn parse_window_command(msg: &IpcMessage, rdesktop_id: u64) -> Option<WindowCommand> {
         // Check if the payload has __window__ flag
-        if msg.payload.get("__window__").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if msg
+            .payload
+            .get("__window__")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let action = match msg.payload["action"].as_str()? {
                 "minimize" => WindowAction::Minimize,
                 "maximize" => WindowAction::Maximize,
@@ -230,7 +326,10 @@ impl WebViewRenderer {
                 }
                 _ => return None,
             };
-            return Some(WindowCommand { rdesktop_id, action });
+            return Some(WindowCommand {
+                rdesktop_id,
+                action,
+            });
         }
         None
     }
@@ -384,6 +483,7 @@ impl Renderer for WebViewRenderer {
 
         let ipc_handler = self.ipc_handler.take();
         let webgpu_enabled = self._config.renderer.webgpu;
+        let asset_root = self.asset_root.clone();
         let pending_windows: Vec<(u64, WindowConfig)> =
             self.pending_windows.borrow_mut().drain(..).collect();
         let pending_ops: Vec<PendingOp> = self.pending_ops.borrow_mut().drain(..).collect();
@@ -478,6 +578,13 @@ impl Renderer for WebViewRenderer {
                             .with_devtools(cfg!(debug_assertions))
                             .with_initialization_script(Self::bridge_script());
 
+                        if let Some(root) = asset_root.clone() {
+                            builder = builder.with_custom_protocol(
+                                "rdesktop".to_string(),
+                                move |_webview_id, request| serve_asset(&root, request),
+                            );
+                        }
+
                         // Enable WebGPU in the web context when requested, so the
                         // frontend can drive native shaders (wallpaper effects).
                         if window_config.transparent {
@@ -490,8 +597,9 @@ impl Renderer for WebViewRenderer {
                         // via a different path, so the args are Windows-only.
                         #[cfg(target_os = "windows")]
                         if webgpu_enabled {
-                            builder = builder
-                                .with_additional_browser_args("--enable-features=Vulkan,WebGPU --enable-unsafe-webgpu");
+                            builder = builder.with_additional_browser_args(
+                                "--enable-features=Vulkan,WebGPU --enable-unsafe-webgpu",
+                            );
                         }
 
                         // Wire up IPC handler
@@ -525,8 +633,7 @@ impl Renderer for WebViewRenderer {
                                             }
                                         }
                                     }
-                                },
-                            );
+                                });
                         }
 
                         let webview = match builder.build(&window) {
@@ -550,11 +657,7 @@ impl Renderer for WebViewRenderer {
 
                     // Process pending operations
                     for op in &pending_ops {
-                        Self::apply_op(
-                            op,
-                            &windows,
-                            &rdesktop_to_tao,
-                        );
+                        Self::apply_op(op, &windows, &rdesktop_to_tao);
                     }
                 }
 

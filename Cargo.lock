@@ -2380,6 +2380,7 @@ name = "rdesktop-webview"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "percent-encoding",
  "raw-window-handle",
  "rdesktop-core",
  "serde",

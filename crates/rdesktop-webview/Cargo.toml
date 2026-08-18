@@ -16,6 +16,7 @@ wry = "0.56"
 tao = "0.36"
 raw-window-handle = "0.6"
 url = "2"
+percent-encoding = "2"
 
 [features]
 default = ["os-webview"]
