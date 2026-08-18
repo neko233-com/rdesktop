@@ -444,6 +444,7 @@ impl Renderer for CefRenderer {
                             .with_decorations(wc.decorations)
                             .with_transparent(wc.transparent)
                             .with_always_on_top(wc.always_on_top)
+                            .with_window_icon(rdesktop_core::window_icon(wc))
                             .build(el_target)
                         {
                             Ok(w) => w,

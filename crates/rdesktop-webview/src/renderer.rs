@@ -621,6 +621,7 @@ impl Renderer for WebViewRenderer {
                             .with_decorations(window_config.decorations)
                             .with_transparent(window_config.transparent)
                             .with_always_on_top(window_config.always_on_top)
+                            .with_window_icon(rdesktop_core::window_icon(window_config))
                             .build(event_loop_target)
                         {
                             Ok(w) => w,

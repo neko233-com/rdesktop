@@ -199,6 +199,17 @@ impl Default for WindowKind {
     }
 }
 
+/// 32-bit RGBA window icon data used by native window backends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowIcon {
+    /// Pixels in row-major RGBA order.
+    pub rgba: Vec<u8>,
+    /// Icon width in pixels.
+    pub width: u32,
+    /// Icon height in pixels.
+    pub height: u32,
+}
+
 /// Window configuration for native mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowConfig {
@@ -234,6 +245,10 @@ pub struct WindowConfig {
     #[serde(default = "default_true")]
     pub visible_on_all_workspaces: bool,
 
+    /// Optional native icon shown in the title bar, taskbar and background previews.
+    #[serde(default)]
+    pub icon: Option<WindowIcon>,
+
     /// Window layer/kind. See [`WindowKind`].
     #[serde(default)]
     pub kind: WindowKind,
@@ -261,6 +276,7 @@ impl Default for WindowConfig {
             transparent: false,
             always_on_top: false,
             visible_on_all_workspaces: true,
+            icon: None,
             kind: WindowKind::default(),
             click_through: false,
             min_size: None,

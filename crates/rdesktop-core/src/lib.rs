@@ -41,7 +41,7 @@ pub mod simulate_win;
 pub mod simulate_mac;
 
 pub use app::{App, AppBuilder, WindowContent};
-pub use config::{AppConfig, BundleConfig, CommandConfig, DevConfig, GlobalInputConfig, HotkeyConfig, RendererConfig, RendererKind as ConfigRendererKind, WindowConfig, WindowKind};
+pub use config::{AppConfig, BundleConfig, CommandConfig, DevConfig, GlobalInputConfig, HotkeyConfig, RendererConfig, RendererKind as ConfigRendererKind, WindowConfig, WindowIcon, WindowKind};
 pub use error::{RdesktopError, Result};
 pub use event::Event;
 pub use global::{Outbox, PushHandler};
@@ -51,4 +51,4 @@ pub use simulate::InputSimulator;
 pub use ipc::{IpcHandler, IpcMessage, IpcResponse};
 pub use renderer::{Renderer, RendererKind, ResizeEdge};
 pub use window::WindowHandle;
-pub use window_extras::apply_window_attributes;
+pub use window_extras::{apply_window_attributes, window_icon};

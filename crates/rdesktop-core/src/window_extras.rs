@@ -11,7 +11,19 @@
 //!   a Wallpaper-Engine-style background.
 
 use crate::config::{WindowConfig, WindowKind};
-use tao::window::Window;
+use tao::window::{Icon, Window};
+
+/// Convert a framework icon into the platform window icon type.
+pub fn window_icon(config: &WindowConfig) -> Option<Icon> {
+    let icon = config.icon.as_ref()?;
+    match Icon::from_rgba(icon.rgba.clone(), icon.width, icon.height) {
+        Ok(icon) => Some(icon),
+        Err(error) => {
+            tracing::warn!(%error, "invalid rdesktop window icon; continuing without icon");
+            None
+        }
+    }
+}
 
 /// Apply `config.kind` / `config.click_through` to a freshly built window.
 pub fn apply_window_attributes(window: &Window, config: &WindowConfig) {
