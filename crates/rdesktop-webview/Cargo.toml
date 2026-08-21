@@ -4,6 +4,8 @@ description = "WebView backend for rdesktop (WebView2/WebKit/WebKitGTK)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 rdesktop-core = { workspace = true }

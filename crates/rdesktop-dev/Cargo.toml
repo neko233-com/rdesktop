@@ -4,6 +4,8 @@ description = "Agent-first development server for rdesktop - browser mode for AI
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 rdesktop-core = { workspace = true }

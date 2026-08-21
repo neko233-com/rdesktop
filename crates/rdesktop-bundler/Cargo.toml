@@ -4,6 +4,8 @@ description = "Cross-platform bundler for rdesktop - produces installers and exe
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 rdesktop-core = { workspace = true }

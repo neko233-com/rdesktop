@@ -4,6 +4,8 @@ description = "CLI tool for rdesktop framework"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
 
 [[bin]]
 name = "rdesktop"

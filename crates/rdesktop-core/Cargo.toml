@@ -4,6 +4,8 @@ description = "Core abstractions for rdesktop - a dual-engine Rust desktop frame
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 serde = { workspace = true }
