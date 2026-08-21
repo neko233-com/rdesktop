@@ -94,7 +94,11 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init { name, chrome } => cmd_init(&name, chrome),
-        Commands::Dev { path, port, no_open } => cmd_dev(&path, port, no_open).await,
+        Commands::Dev {
+            path,
+            port,
+            no_open,
+        } => cmd_dev(&path, port, no_open).await,
         Commands::Build { path, chrome } => cmd_build(&path, chrome),
         Commands::Bundle { path, target, all } => cmd_bundle(&path, target, all),
         Commands::Info { path } => cmd_info(&path),
@@ -342,6 +346,7 @@ async fn cmd_dev(path: &PathBuf, port: Option<u16>, no_open: bool) -> anyhow::Re
     // Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     println!("\nShutting down...");
+    server.shutdown().await?;
 
     Ok(())
 }
@@ -371,10 +376,7 @@ version = "0.1.0"
             .as_str()
             .unwrap_or("com.example.app")
             .to_string(),
-        name: config["app"]["name"]
-            .as_str()
-            .unwrap_or("App")
-            .to_string(),
+        name: config["app"]["name"].as_str().unwrap_or("App").to_string(),
         version: config["app"]["version"]
             .as_str()
             .unwrap_or("0.1.0")

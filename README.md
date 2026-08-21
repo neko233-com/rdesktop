@@ -144,6 +144,15 @@ page.fill("input#name", "World")
 import requests
 dom = requests.get("http://localhost:1420/__rdesktop__/agent/dom").json()
 state = requests.get("http://localhost:1420/__rdesktop__/agent/state").json()
+
+# 开始录制视觉调试视频（同一 dev server 永远只有一个录制会话）
+recording = requests.post(
+    "http://localhost:1420/__rdesktop__/agent/recording/start",
+    json={"fps": 30, "max_duration_seconds": 300},
+).json()
+# ...执行交互、热重载和视觉验证...
+stopped = requests.post("http://localhost:1420/__rdesktop__/agent/recording/stop", json={}).json()
+# 完成后下载：http://localhost:1420/__rdesktop__/agent/recording/file
 ```
 
 ### 3. Agent API 端点
@@ -155,7 +164,23 @@ POST /__rdesktop__/agent/action       # 执行 UI 操作（click/type/scroll）
 GET  /__rdesktop__/agent/state        # 应用状态快照
 POST /__rdesktop__/agent/ipc          # 向 Rust 后端发送 IPC 消息
 GET  /__rdesktop__/agent/screenshot   # 截图（委托给 Playwright）
+GET  /__rdesktop__/agent/recording    # 唯一录制会话状态
+POST /__rdesktop__/agent/recording/start # 幂等开始录屏
+POST /__rdesktop__/agent/recording/stop  # 停止并 finalize 固定的 recording.mp4
+GET  /__rdesktop__/agent/recording/file  # 下载唯一录制文件
 ```
+
+开发服务器会自动注入 bridge，轮询前端文件变化并热重载页面。Windows 下录屏由
+开发服务器原生捕获整个虚拟桌面，并使用系统自带的 Media Foundation H.264 编码为
+`.rdesktop/recording.mp4`；agent 不需要处理浏览器授权，也不需要安装或打包 ffmpeg。
+`start` 接受可选的 `fps`（1–60）和 `max_duration_seconds`（默认 300 秒，最多 3600 秒），
+到时会自动停止；`stop` 可带 `session_id` 做并发保护。重复调用 `start/stop` 只会复用或
+返回同一个录制会话，不会产生第二个视频文件。原生录制期间的临时文件会在正常 finalize
+后清理，开发服务器启动、录制失败或 Ctrl+C 退出时也会清理/ finalize 残留临时文件。
+
+非 Windows 环境保留浏览器 bridge 的 `getDisplayMedia` + `MediaRecorder` 降级路径；
+这一路径可能要求用户选择窗口，并可能输出浏览器支持的 WebM。agent 应以
+`GET /__rdesktop__/agent/recording` 返回的 `native`、`mime_type` 和 `status` 为准。
 
 ### 4. 从浏览器模式无缝切换到原生
 
