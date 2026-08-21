@@ -168,6 +168,7 @@ rdesktop supports browser-based development for AI agent workflows:
 │  │  │  - Element queries                 │  ││
 │  │  │  - Action execution                │  ││
 │  │  │  - IPC bridge                      │  ││
+│  │  │  - Hot reload + MP4 recorder       │  ││
 │  │  └───────────────────────────────────┘  ││
 │  └─────────────────────────────────────────┘│
 │         ↑                                    │
@@ -189,6 +190,32 @@ rdesktop supports browser-based development for AI agent workflows:
 | `/__rdesktop__/agent/state` | GET | Application state |
 | `/__rdesktop__/agent/ipc` | POST | Send IPC message |
 | `/__rdesktop__/agent/screenshot` | GET | Screenshot (via Playwright) |
+| `/__rdesktop__/agent/recording` | GET | The single recording lifecycle state |
+| `/__rdesktop__/agent/recording/start` | POST | Idempotently start native desktop recording (`fps`, optional max duration) |
+| `/__rdesktop__/agent/recording/stop` | POST | Stop and finalize the single recording |
+| `/__rdesktop__/agent/recording/file` | GET | Download the finalized recording |
+
+### Visual debug recording
+
+The development server owns one recording state machine and one fixed output stem:
+
+```
+Windows agent start → Recording → agent stop → Finalizing → Completed (recording.mp4)
+
+Browser fallback start → Recording → StopRequested → browser flush
+                                      → Finalizing → Completed (recording.webm/mp4)
+```
+
+On Windows, the dev server captures the full virtual desktop with GDI and writes H.264
+through the OS-provided Media Foundation sink writer. This is a dev-only native path:
+it produces a real MP4 without an ffmpeg runtime or packaged media dependency. The
+injected bridge detects `native: true` and does not start a second browser recorder. A
+recording has a five-minute default and a one-hour hard maximum; timeout, startup, and
+failure cleanup remove transient files instead of accumulating abandoned media. CLI
+shutdown finalizes an active native recording before exiting.
+Non-Windows keeps the browser `getDisplayMedia`/`MediaRecorder` fallback. A page reload
+reconnects to the same server session, so hot reload does not create a second recording
+file.
 
 ## Bundler Design
 

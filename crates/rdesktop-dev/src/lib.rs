@@ -26,8 +26,12 @@
 //! - `GET /__rdesktop__/agent/state` - Application state snapshot
 //! - `POST /__rdesktop__/agent/ipc` - Send IPC message from agent
 //! - `GET /__rdesktop__/agent/screenshot` - Capture current view
+//! - `POST /__rdesktop__/agent/recording/start` - Start or reuse the one video recording
+//! - `POST /__rdesktop__/agent/recording/stop` - Stop and finalize the recording
+//! - `GET /__rdesktop__/agent/recording/file` - Download the finalized recording
 
 pub mod server;
 pub mod agent_api;
+mod native_recorder;
 
 pub use server::DevServer;

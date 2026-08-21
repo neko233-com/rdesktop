@@ -21,14 +21,18 @@
 //! - **More informative**: Full DOM tree, computed styles, accessibility info
 //! - **Easier to test**: Standard HTTP endpoints, can be scripted
 
+use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::server::DevServerState;
+use crate::server::{
+    DevServerState, RecordingSnapshot, RecordingStatus, DEFAULT_RECORDING_MAX_DURATION_SECONDS,
+    MAX_RECORDING_MAX_DURATION_SECONDS,
+};
 
 /// Query parameters for element selection.
 #[derive(Debug, Deserialize)]
@@ -44,7 +48,7 @@ pub struct ElementQuery {
 }
 
 /// An action that an agent can execute on the UI.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentAction {
     /// The type of action
     pub action: ActionType,
@@ -60,7 +64,7 @@ pub struct AgentAction {
 }
 
 /// Types of actions agents can execute.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionType {
     Click,
@@ -132,13 +136,44 @@ pub struct ActionResult {
     pub side_effects: Vec<String>,
 }
 
+/// Optional request body for starting a recording. The server owns the
+/// recording identity; agents may safely send `{}` more than once.
+#[derive(Debug, Deserialize, Default)]
+pub struct RecordingStartRequest {
+    pub fps: Option<u32>,
+    /// Safety limit for forgotten recordings. Defaults to five minutes.
+    pub max_duration_seconds: Option<u64>,
+}
+
+/// Optional session guard for stopping a recording.
+#[derive(Debug, Deserialize, Default)]
+pub struct RecordingStopRequest {
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecordingStartedRequest {
+    pub session_id: String,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecordingCompleteRequest {
+    pub session_id: String,
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecordingErrorRequest {
+    pub session_id: String,
+    pub error: String,
+}
+
 /// GET /__rdesktop__/agent/dom
 ///
 /// Returns a full DOM snapshot of the current page.
 /// The snapshot is collected from the browser via the bridge script.
-pub async fn get_dom(
-    State(state): State<DevServerState>,
-) -> impl IntoResponse {
+pub async fn get_dom(State(state): State<DevServerState>) -> impl IntoResponse {
     let snapshot = state.last_dom_snapshot.read().await;
 
     let html = snapshot.clone().unwrap_or_else(|| {
@@ -196,7 +231,7 @@ pub async fn query_elements(
 /// Execute a UI action (click, type, scroll, etc.)
 /// The action is stored and picked up by the bridge script.
 pub async fn execute_action(
-    State(_state): State<DevServerState>,
+    State(state): State<DevServerState>,
     Json(action): Json<AgentAction>,
 ) -> impl IntoResponse {
     tracing::info!(
@@ -205,27 +240,32 @@ pub async fn execute_action(
         "Agent action received"
     );
 
-    // In a full implementation, this would:
-    // 1. Store the action in a shared queue
-    // 2. The bridge script polls for pending actions
-    // 3. The bridge executes the action in the browser
-    // 4. The result is returned
+    state.pending_actions.lock().await.push(action.clone());
 
     let result = ActionResult {
         success: true,
         error: None,
-        side_effects: vec![format!("Action {:?} on '{}' queued", action.action, action.selector)],
+        side_effects: vec![format!(
+            "Action {:?} on '{}' queued",
+            action.action, action.selector
+        )],
     };
 
     Json(result).into_response()
 }
 
+/// GET /__rdesktop__/agent/action/pending
+///
+/// Drain actions queued by agents. The bridge polls this endpoint.
+pub async fn pending_actions(State(state): State<DevServerState>) -> impl IntoResponse {
+    let mut actions = state.pending_actions.lock().await;
+    Json(std::mem::take(&mut *actions)).into_response()
+}
+
 /// GET /__rdesktop__/agent/state
 ///
 /// Get the current application state.
-pub async fn get_state(
-    State(state): State<DevServerState>,
-) -> impl IntoResponse {
+pub async fn get_state(State(state): State<DevServerState>) -> impl IntoResponse {
     let app_state = state.last_app_state.read().await;
 
     match app_state.as_ref() {
@@ -284,15 +324,217 @@ pub async fn send_ipc(
 /// GET /__rdesktop__/agent/screenshot
 ///
 /// Capture a screenshot. In browser mode, this delegates to the browser.
-pub async fn take_screenshot(
-    State(_state): State<DevServerState>,
-) -> impl IntoResponse {
+pub async fn take_screenshot(State(_state): State<DevServerState>) -> impl IntoResponse {
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(serde_json::json!({
             "message": "Screenshot not implemented in browser mode.",
             "hint": "Use Playwright's page.screenshot() directly."
         })),
+    )
+        .into_response()
+}
+
+/// GET /__rdesktop__/agent/recording
+///
+/// Return the one recording session owned by this dev server.
+pub async fn get_recording(State(state): State<DevServerState>) -> impl IntoResponse {
+    Json(state.recording.snapshot().await).into_response()
+}
+
+/// GET /__rdesktop__/agent/recording/poll
+///
+/// Alias used by the browser bridge to discover start/stop commands.
+pub async fn poll_recording(State(state): State<DevServerState>) -> impl IntoResponse {
+    Json(state.recording.snapshot().await).into_response()
+}
+
+/// POST /__rdesktop__/agent/recording/start
+///
+/// Start the single recording, or return the existing session when recording
+/// is already active. This is intentionally idempotent.
+pub async fn start_recording(
+    State(state): State<DevServerState>,
+    request: Option<Json<RecordingStartRequest>>,
+) -> impl IntoResponse {
+    let request = request.map(|Json(request)| request).unwrap_or_default();
+    let fps = request.fps.unwrap_or(30).clamp(1, 60);
+    let max_duration_seconds = request
+        .max_duration_seconds
+        .unwrap_or(DEFAULT_RECORDING_MAX_DURATION_SECONDS)
+        .clamp(1, MAX_RECORDING_MAX_DURATION_SECONDS);
+    let max_duration = std::time::Duration::from_secs(max_duration_seconds);
+    match state.recording.start_with_options(fps, max_duration).await {
+        Ok((recording, reused)) => {
+            if !reused {
+                if let Some(session_id) = recording.session_id.clone() {
+                    let recording_store = state.recording.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(max_duration).await;
+                        if let Err(error) = recording_store.stop(Some(&session_id)).await {
+                            tracing::warn!(%error, "recording auto-stop failed");
+                        }
+                    });
+                }
+            }
+            Json(serde_json::json!({
+                "ok": true,
+                "reused": reused,
+                "auto_stop_seconds": max_duration_seconds,
+                "recording": recording,
+            }))
+            .into_response()
+        }
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+/// POST /__rdesktop__/agent/recording/stop
+///
+/// Stop and finalize the native recorder, or request the browser bridge to
+/// flush and finalize its MediaRecorder. Repeating this call is safe.
+pub async fn stop_recording(
+    State(state): State<DevServerState>,
+    request: Option<Json<RecordingStopRequest>>,
+) -> impl IntoResponse {
+    let session_id = request.and_then(|Json(request)| request.session_id);
+    match state.recording.stop(session_id.as_deref()).await {
+        Ok(recording) => Json(serde_json::json!({
+            "ok": true,
+            "recording": recording,
+        }))
+        .into_response(),
+        Err(error) => json_error(StatusCode::CONFLICT, error.to_string()),
+    }
+}
+
+/// POST /__rdesktop__/agent/recording/started
+///
+/// Tell the server which browser MediaRecorder MIME type was selected.
+pub async fn recording_started(
+    State(state): State<DevServerState>,
+    Json(request): Json<RecordingStartedRequest>,
+) -> impl IntoResponse {
+    match state
+        .recording
+        .mark_started(&request.session_id, &request.mime_type)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(error) => json_error(StatusCode::CONFLICT, error.to_string()),
+    }
+}
+
+/// POST /__rdesktop__/agent/recording/chunk
+///
+/// Append one MediaRecorder Blob to the single `.partial` file. Chunks are
+/// serialized by the store so concurrent browser callbacks cannot interleave.
+pub async fn recording_chunk(
+    State(state): State<DevServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let Some(session_id) = header_value(&headers, "x-rdesktop-recording-id") else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "missing recording session header".to_string(),
+        );
+    };
+    if body.is_empty() {
+        return Json(serde_json::json!({ "ok": true, "bytes": 0 })).into_response();
+    }
+    match state.recording.append_chunk(&session_id, &body).await {
+        Ok(bytes) => Json(serde_json::json!({ "ok": true, "bytes": bytes })).into_response(),
+        Err(error) => json_error(StatusCode::CONFLICT, error.to_string()),
+    }
+}
+
+/// POST /__rdesktop__/agent/recording/complete
+pub async fn recording_complete(
+    State(state): State<DevServerState>,
+    Json(request): Json<RecordingCompleteRequest>,
+) -> impl IntoResponse {
+    match state
+        .recording
+        .complete(&request.session_id, request.mime_type.as_deref())
+        .await
+    {
+        Ok(recording) => recording_response(recording),
+        Err(error) => json_error(StatusCode::CONFLICT, error.to_string()),
+    }
+}
+
+/// POST /__rdesktop__/agent/recording/error
+pub async fn recording_error(
+    State(state): State<DevServerState>,
+    Json(request): Json<RecordingErrorRequest>,
+) -> impl IntoResponse {
+    match state
+        .recording
+        .fail(&request.session_id, request.error)
+        .await
+    {
+        Ok(recording) => recording_response(recording),
+        Err(error) => json_error(StatusCode::CONFLICT, error.to_string()),
+    }
+}
+
+/// GET /__rdesktop__/agent/recording/file
+pub async fn recording_file(State(state): State<DevServerState>) -> impl IntoResponse {
+    let recording = state.recording.snapshot().await;
+    if recording.status != RecordingStatus::Completed {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            format!("recording is not complete: {:?}", recording.status),
+        );
+    }
+
+    match tokio::fs::read(&recording.path).await {
+        Ok(bytes) => axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                header::CONTENT_TYPE,
+                recording.mime_type.as_deref().unwrap_or("video/webm"),
+            )
+            .header(
+                header::CONTENT_DISPOSITION,
+                if recording
+                    .mime_type
+                    .as_deref()
+                    .map(|mime| mime.starts_with("video/mp4"))
+                    .unwrap_or(false)
+                {
+                    "attachment; filename=recording.mp4"
+                } else {
+                    "attachment; filename=recording.webm"
+                },
+            )
+            .body(axum::body::Body::from(bytes))
+            .expect("recording response is valid")
+            .into_response(),
+        Err(error) => json_error(StatusCode::NOT_FOUND, error.to_string()),
+    }
+}
+
+fn recording_response(recording: RecordingSnapshot) -> axum::response::Response {
+    Json(serde_json::json!({
+        "ok": recording.status == RecordingStatus::Completed,
+        "recording": recording,
+    }))
+    .into_response()
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+fn json_error(status: StatusCode, error: String) -> axum::response::Response {
+    (
+        status,
+        Json(serde_json::json!({ "ok": false, "error": error })),
     )
         .into_response()
 }

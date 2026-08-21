@@ -2373,6 +2373,7 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
+ "windows",
 ]
 
 [[package]]
