@@ -11,11 +11,11 @@ use crate::hotkeys::Key;
 use crate::hotkeys_win::key_to_vk;
 use crate::input::MouseButton;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    MapVirtualKeyW, SendInput, INPUT, KEYBDINPUT, MOUSEINPUT, INPUT_KEYBOARD, INPUT_MOUSE,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+    MapVirtualKeyW, SendInput, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MAPVK_VK_TO_VSC,
+    MOUSEEVENTF_XUP, MOUSEINPUT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, XBUTTON1, XBUTTON2,
@@ -144,11 +144,19 @@ fn button_flags(button: MouseButton, down: bool) -> (u32, u32) {
             0,
         ),
         MouseButton::X1 => (
-            if down { MOUSEEVENTF_XDOWN } else { MOUSEEVENTF_XUP },
+            if down {
+                MOUSEEVENTF_XDOWN
+            } else {
+                MOUSEEVENTF_XUP
+            },
             XBUTTON1 as u32,
         ),
         MouseButton::X2 => (
-            if down { MOUSEEVENTF_XDOWN } else { MOUSEEVENTF_XUP },
+            if down {
+                MOUSEEVENTF_XDOWN
+            } else {
+                MOUSEEVENTF_XUP
+            },
             XBUTTON2 as u32,
         ),
     }

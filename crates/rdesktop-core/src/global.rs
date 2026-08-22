@@ -28,9 +28,9 @@ impl PushHandler {
 
 impl HotkeyHandler for PushHandler {
     fn on_hotkey(&self, id: u32, hotkey: &Hotkey) {
-        if let Ok(s) =
-            serde_json::to_string(&json!({ "cmd": "rdesktop.globalHotkey", "payload": { "id": id, "combo": hotkey.to_string() } }))
-        {
+        if let Ok(s) = serde_json::to_string(
+            &json!({ "cmd": "rdesktop.globalHotkey", "payload": { "id": id, "combo": hotkey.to_string() } }),
+        ) {
             self.outbox.lock().unwrap().push(s);
         }
     }

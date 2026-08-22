@@ -49,9 +49,9 @@ mod windows {
     use tao::window::Window;
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, FindWindowExW, FindWindowW, GetWindowLongPtrW, GWL_EXSTYLE, HWND_BOTTOM,
-        SendMessageTimeoutW, SetParent, SetWindowLongPtrW, SetWindowPos, SMTO_ABORTIFHUNG,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+        EnumWindows, FindWindowExW, FindWindowW, GetWindowLongPtrW, SendMessageTimeoutW, SetParent,
+        SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_BOTTOM, SMTO_ABORTIFHUNG,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
     };
 
     pub(crate) fn apply(window: &Window, click_through: bool, is_wallpaper: bool) {
@@ -102,12 +102,21 @@ mod windows {
         );
         let mut worker: HWND = 0;
         EnumWindows(Some(enum_proc), &mut worker as *mut _ as LPARAM);
-        if worker == 0 { None } else { Some(worker) }
+        if worker == 0 {
+            None
+        } else {
+            Some(worker)
+        }
     }
 
     extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         unsafe {
-            let defview = FindWindowExW(hwnd, 0, windows_sys::w!("SHELLDLL_DefView"), ptr::null::<u16>());
+            let defview = FindWindowExW(
+                hwnd,
+                0,
+                windows_sys::w!("SHELLDLL_DefView"),
+                ptr::null::<u16>(),
+            );
             if defview != 0 {
                 let pworker = &mut *(lparam as *mut HWND);
                 *pworker = FindWindowExW(0, hwnd, windows_sys::w!("WorkerW"), ptr::null::<u16>());
@@ -132,7 +141,8 @@ mod macos {
         unsafe {
             let _: () = msg_send![ns_win, setIgnoresMouseEvents: click_through || is_wallpaper];
             if is_wallpaper {
-                let level: i64 = CGWindowLevelForKey(CGWindowLevelKey::kCGDesktopWindowLevelKey) as i64;
+                let level: i64 =
+                    CGWindowLevelForKey(CGWindowLevelKey::kCGDesktopWindowLevelKey) as i64;
                 let _: () = msg_send![ns_win, setLevel: level];
                 let _: () = msg_send![ns_win, orderBack: ns_win];
             }

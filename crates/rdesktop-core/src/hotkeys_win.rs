@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, PostQuitMessage, TranslateMessage, WM_HOTKEY,
+    DispatchMessageW, GetMessageW, PostQuitMessage, TranslateMessage, MSG, WM_HOTKEY,
 };
 
 // Virtual-key codes (integer literals; windows-sys 0.52 types VK_* as the

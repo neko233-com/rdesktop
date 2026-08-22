@@ -11,9 +11,9 @@
 //! - **macOS**: a `CGEvent`-based implementation (pending real macOS build;
 //!   the current target returns [`crate::error::RdesktopError::UnsupportedPlatform`]).
 
-use crate::error::Result;
 #[cfg(not(any(windows, target_os = "macos")))]
 use crate::error::RdesktopError;
+use crate::error::Result;
 use crate::hotkeys::Key;
 use crate::input::MouseButton;
 

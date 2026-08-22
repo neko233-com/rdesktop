@@ -1,5 +1,5 @@
 use rdesktop_core::config::{AppConfig, WindowConfig};
-use rdesktop_core::ipc::{IpcMessage, IpcResponse, FnIpcHandler};
+use rdesktop_core::ipc::{FnIpcHandler, IpcMessage, IpcResponse};
 use rdesktop_core::renderer::Renderer;
 use rdesktop_webview::WebViewRenderer;
 

@@ -8,7 +8,7 @@
 //! 2. Injects the rdesktop bridge script for IPC
 //! 3. Provides Agent API endpoints for AI agent interaction
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,10 +21,11 @@ use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{watch, Mutex, Notify, RwLock};
 use tower_http::cors::CorsLayer;
 
 use rdesktop_core::config::DevConfig;
+use rdesktop_core::ipc::IpcHandler;
 
 use crate::agent_api;
 use crate::native_recorder::NativeRecorder;
@@ -33,6 +34,98 @@ use crate::native_recorder::NativeRecorder;
 /// producing a large debug artifact forever.
 pub(crate) const DEFAULT_RECORDING_MAX_DURATION_SECONDS: u64 = 300;
 pub(crate) const MAX_RECORDING_MAX_DURATION_SECONDS: u64 = 3600;
+const MAX_SCREENSHOT_BYTES: usize = 16 * 1024 * 1024;
+
+/// A single immutable PNG frame published by a native renderer.
+#[derive(Debug, Clone)]
+pub struct PublishedScreenshot {
+    pub generation: u64,
+    pub png: Vec<u8>,
+}
+
+struct ScreenshotPublisherInner {
+    next_generation: AtomicU64,
+    frames: watch::Sender<Option<PublishedScreenshot>>,
+}
+
+/// Publishes native renderer frames to the Agent API without making the HTTP
+/// server poll a file that may still be written by the renderer.
+#[derive(Clone)]
+pub struct ScreenshotPublisher {
+    inner: Arc<ScreenshotPublisherInner>,
+}
+
+impl ScreenshotPublisher {
+    pub fn new() -> Self {
+        let (frames, _) = watch::channel(None);
+        Self {
+            inner: Arc::new(ScreenshotPublisherInner {
+                next_generation: AtomicU64::new(0),
+                frames,
+            }),
+        }
+    }
+
+    /// Publish a complete PNG frame. Oversized or empty frames are rejected so
+    /// a broken renderer cannot turn the Agent endpoint into an unbounded IPC
+    /// sink.
+    pub fn publish_png(&self, png: &[u8]) {
+        if png.is_empty() || png.len() > MAX_SCREENSHOT_BYTES {
+            tracing::warn!(
+                bytes = png.len(),
+                "rdesktop Agent rejected invalid screenshot frame"
+            );
+            return;
+        }
+        let generation = self
+            .inner
+            .next_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        self.inner.frames.send_replace(Some(PublishedScreenshot {
+            generation,
+            png: png.to_vec(),
+        }));
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.inner.next_generation.load(Ordering::Relaxed)
+    }
+
+    pub async fn latest(&self) -> Option<PublishedScreenshot> {
+        self.inner.frames.subscribe().borrow().clone()
+    }
+
+    pub async fn wait_for_next(
+        &self,
+        after_generation: u64,
+        timeout: std::time::Duration,
+    ) -> Option<PublishedScreenshot> {
+        let mut receiver = self.inner.frames.subscribe();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(frame) = receiver.borrow().clone() {
+                if frame.generation > after_generation {
+                    return Some(frame);
+                }
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(remaining, receiver.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => return None,
+            }
+        }
+    }
+}
+
+impl Default for ScreenshotPublisher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Shared state for the development server.
 #[derive(Clone)]
@@ -52,6 +145,15 @@ pub struct DevServerState {
     /// Shared queue of actions waiting for the browser bridge.
     pub pending_actions: Arc<Mutex<Vec<agent_api::AgentAction>>>,
 
+    /// Action IDs currently waiting for a bridge execution receipt.
+    pub action_waiters: Arc<Mutex<HashSet<String>>>,
+
+    /// Bridge execution receipts consumed by `?wait=true` callers.
+    pub action_results: Arc<Mutex<HashMap<String, agent_api::ActionResult>>>,
+
+    /// Wakes action callers when the bridge posts a receipt.
+    pub action_result_notify: Arc<Notify>,
+
     /// Monotonically increasing frontend version used by hot reload.
     pub reload_generation: Arc<AtomicU64>,
 
@@ -60,10 +162,25 @@ pub struct DevServerState {
 
     /// The one and only recording session for this dev server.
     pub recording: Arc<RecordingStore>,
+
+    /// The latest native PNG frame and its generation counter.
+    pub screenshot_publisher: ScreenshotPublisher,
+
+    /// Optional compatibility path used by hosts that also persist frames.
+    pub screenshot_path: Option<PathBuf>,
+
+    /// Optional host IPC handler for the native Agent bridge.
+    pub ipc_handler: Option<Arc<dyn IpcHandler>>,
 }
 
 impl DevServerState {
-    fn new(frontend_dir: PathBuf, hot_reload: bool) -> Self {
+    fn new(
+        frontend_dir: PathBuf,
+        hot_reload: bool,
+        screenshot_publisher: ScreenshotPublisher,
+        screenshot_path: Option<PathBuf>,
+        ipc_handler: Option<Arc<dyn IpcHandler>>,
+    ) -> Self {
         let recording_path = frontend_dir
             .parent()
             .unwrap_or(&frontend_dir)
@@ -76,6 +193,9 @@ impl DevServerState {
             frontend_dir,
             hot_reload,
             pending_actions: Arc::new(Mutex::new(Vec::new())),
+            action_waiters: Arc::new(Mutex::new(HashSet::new())),
+            action_results: Arc::new(Mutex::new(HashMap::new())),
+            action_result_notify: Arc::new(Notify::new()),
             reload_generation: Arc::new(AtomicU64::new(0)),
             frontend_signature: Arc::new(RwLock::new(0)),
             recording: Arc::new(if cfg!(windows) {
@@ -83,6 +203,9 @@ impl DevServerState {
             } else {
                 RecordingStore::new(recording_path)
             }),
+            screenshot_publisher,
+            screenshot_path,
+            ipc_handler,
         }
     }
 }
@@ -530,6 +653,9 @@ pub struct DevServer {
     config: DevConfig,
     frontend_dir: PathBuf,
     recording: Arc<Mutex<Option<Arc<RecordingStore>>>>,
+    ipc_handler: Option<Arc<dyn IpcHandler>>,
+    screenshot_path: Option<PathBuf>,
+    screenshot_publisher: ScreenshotPublisher,
 }
 
 impl DevServer {
@@ -539,7 +665,37 @@ impl DevServer {
             config,
             frontend_dir,
             recording: Arc::new(Mutex::new(None)),
+            ipc_handler: None,
+            screenshot_path: None,
+            screenshot_publisher: ScreenshotPublisher::new(),
         }
+    }
+
+    /// Create a server whose Agent IPC endpoint forwards to the native host.
+    pub fn new_with_handler(
+        config: DevConfig,
+        frontend_dir: PathBuf,
+        handler: Arc<dyn IpcHandler>,
+    ) -> Self {
+        Self {
+            config,
+            frontend_dir,
+            recording: Arc::new(Mutex::new(None)),
+            ipc_handler: Some(handler),
+            screenshot_path: None,
+            screenshot_publisher: ScreenshotPublisher::new(),
+        }
+    }
+
+    /// Keep a stable on-disk copy for humans and external image viewers. The
+    /// Agent endpoint itself serves the in-memory published frame.
+    pub fn with_screenshot_path(mut self, path: PathBuf) -> Self {
+        self.screenshot_path = Some(path);
+        self
+    }
+
+    pub fn screenshot_publisher(&self) -> ScreenshotPublisher {
+        self.screenshot_publisher.clone()
     }
 
     /// Start the development server.
@@ -549,9 +705,13 @@ impl DevServer {
         let addr = format!("{}:{}", self.config.host, self.config.port);
         let url = format!("http://{}", addr);
 
-        let state = DevServerState {
-            ..DevServerState::new(self.frontend_dir.clone(), self.config.hot_reload)
-        };
+        let state = DevServerState::new(
+            self.frontend_dir.clone(),
+            self.config.hot_reload,
+            self.screenshot_publisher.clone(),
+            self.screenshot_path.clone(),
+            self.ipc_handler.clone(),
+        );
         *self.recording.lock().await = Some(state.recording.clone());
         state.recording.prepare().await?;
 
@@ -636,6 +796,10 @@ impl DevServer {
             .route(
                 "/__rdesktop__/agent/action/pending",
                 get(agent_api::pending_actions),
+            )
+            .route(
+                "/__rdesktop__/agent/action/result",
+                post(agent_api::report_action_result),
             )
             // Health check
             .route("/__rdesktop__/health", get(|| async { "ok" }))
@@ -723,6 +887,7 @@ async fn dev_info() -> Json<serde_json::Value> {
             "dom": "/__rdesktop__/agent/dom",
             "elements": "/__rdesktop__/agent/elements?selector=<css>",
             "action": "/__rdesktop__/agent/action",
+            "action_result": "/__rdesktop__/agent/action/result",
             "state": "/__rdesktop__/agent/state",
             "ipc": "/__rdesktop__/agent/ipc",
             "screenshot": "/__rdesktop__/agent/screenshot",
@@ -994,6 +1159,33 @@ mod tests {
         tokio::fs::remove_dir_all(root)
             .await
             .expect("cleanup test files");
+    }
+
+    #[tokio::test]
+    async fn screenshot_publisher_returns_complete_frames_and_waits_for_new_generation() {
+        let publisher = ScreenshotPublisher::new();
+        assert_eq!(publisher.generation(), 0);
+        assert!(publisher.latest().await.is_none());
+
+        let waiter = publisher.clone();
+        let pending = tokio::spawn(async move {
+            waiter
+                .wait_for_next(0, std::time::Duration::from_secs(1))
+                .await
+        });
+        tokio::task::yield_now().await;
+        publisher.publish_png(b"complete-png-frame");
+
+        let frame = pending
+            .await
+            .expect("screenshot waiter")
+            .expect("new frame");
+        assert_eq!(frame.generation, 1);
+        assert_eq!(frame.png, b"complete-png-frame");
+        assert_eq!(
+            publisher.latest().await.expect("latest frame").generation,
+            1
+        );
     }
 }
 

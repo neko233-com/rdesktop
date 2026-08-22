@@ -16,7 +16,7 @@
 //! When both features are enabled, the Chrome backend is used.
 
 use rdesktop_core::config::{AppConfig, GlobalInputConfig, HotkeyConfig, WindowConfig};
-use rdesktop_core::ipc::{IpcMessage, IpcResponse, FnIpcHandler};
+use rdesktop_core::ipc::{FnIpcHandler, IpcMessage, IpcResponse};
 use rdesktop_core::renderer::Renderer;
 
 #[cfg(feature = "chrome")]
@@ -62,12 +62,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     // The frontend also invokes backend commands; mirror them into the log.
-    let handler = FnIpcHandler::new(|msg: IpcMessage| {
-        IpcResponse {
-            id: msg.id,
-            success: true,
-            data: serde_json::json!({ "echo": msg.cmd }),
-        }
+    let handler = FnIpcHandler::new(|msg: IpcMessage| IpcResponse {
+        id: msg.id,
+        success: true,
+        data: serde_json::json!({ "echo": msg.cmd }),
     });
 
     let frontend_html = include_str!("../frontend/index.html");

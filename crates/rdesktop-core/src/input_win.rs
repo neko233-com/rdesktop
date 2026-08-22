@@ -8,15 +8,15 @@
 use super::input::{GlobalInputEvent, GlobalInputHandler, KeyState, MouseButton};
 use crate::error::{RdesktopError, Result};
 use crate::hotkeys::{Key, Modifiers};
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use windows_sys::Win32::Foundation::{LPARAM, WPARAM};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, PostThreadMessageW,
-    SetWindowsHookExW, UnhookWindowsHookEx, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_LBUTTONDOWN,
+    CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
+    KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
@@ -87,7 +87,11 @@ unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: L
             if let Some(ctx) = INPUT_CTX.lock().unwrap().clone() {
                 ctx.handler.on_event(GlobalInputEvent::Keyboard {
                     key,
-                    state: if up { KeyState::Released } else { KeyState::Pressed },
+                    state: if up {
+                        KeyState::Released
+                    } else {
+                        KeyState::Pressed
+                    },
                     modifiers: current_modifiers(),
                 });
             }
@@ -162,8 +166,7 @@ impl WinInput {
             include_mouse_move,
         }));
 
-        let keyboard_hook =
-            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), 0, 0) };
+        let keyboard_hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), 0, 0) };
         let mouse_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), 0, 0) };
 
         if keyboard_hook == 0 && mouse_hook == 0 {
@@ -194,8 +197,16 @@ impl WinInput {
         let thread_id = id_rx.recv().unwrap_or(0);
 
         Ok(Self {
-            keyboard_hook: if keyboard_hook != 0 { Some(keyboard_hook) } else { None },
-            mouse_hook: if mouse_hook != 0 { Some(mouse_hook) } else { None },
+            keyboard_hook: if keyboard_hook != 0 {
+                Some(keyboard_hook)
+            } else {
+                None
+            },
+            mouse_hook: if mouse_hook != 0 {
+                Some(mouse_hook)
+            } else {
+                None
+            },
             thread: Some(thread),
             thread_id,
         })

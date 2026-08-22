@@ -2295,7 +2295,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rdesktop-bundler"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "rdesktop-core",
@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-cef"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chromiumoxide",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2343,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
@@ -2361,7 +2361,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-dev"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2378,7 +2378,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-webview"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "percent-encoding",

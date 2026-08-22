@@ -14,7 +14,11 @@ impl LinuxBundler {
         Self
     }
 
-    fn bundle_appimage(&self, config: &AppConfig, binary_path: &Path) -> anyhow::Result<BundleResult> {
+    fn bundle_appimage(
+        &self,
+        config: &AppConfig,
+        binary_path: &Path,
+    ) -> anyhow::Result<BundleResult> {
         let appimage_name = format!("{}-{}.AppImage", config.name, config.version);
         let output_dir = PathBuf::from("target/release/bundle/linux");
         std::fs::create_dir_all(&output_dir)?;
@@ -56,7 +60,11 @@ impl LinuxBundler {
     }
 
     fn bundle_deb(&self, config: &AppConfig, binary_path: &Path) -> anyhow::Result<BundleResult> {
-        let deb_name = format!("{}_{}_amd64.deb", config.name.to_lowercase().replace(' ', "-"), config.version);
+        let deb_name = format!(
+            "{}_{}_amd64.deb",
+            config.name.to_lowercase().replace(' ', "-"),
+            config.version
+        );
         let output_dir = PathBuf::from("target/release/bundle/linux");
         let output_path = output_dir.join(&deb_name);
 
@@ -87,7 +95,11 @@ impl LinuxBundler {
     }
 
     fn bundle_rpm(&self, config: &AppConfig, _binary_path: &Path) -> anyhow::Result<BundleResult> {
-        let rpm_name = format!("{}-{}-1.x86_64.rpm", config.name.to_lowercase().replace(' ', "-"), config.version);
+        let rpm_name = format!(
+            "{}-{}-1.x86_64.rpm",
+            config.name.to_lowercase().replace(' ', "-"),
+            config.version
+        );
         let output_dir = PathBuf::from("target/release/bundle/linux");
         let output_path = output_dir.join(&rpm_name);
 
@@ -136,7 +148,12 @@ Description: {description}
 }
 
 impl Bundler for LinuxBundler {
-    fn bundle(&self, config: &AppConfig, target: &BundleTarget, binary_path: &PathBuf) -> anyhow::Result<BundleResult> {
+    fn bundle(
+        &self,
+        config: &AppConfig,
+        target: &BundleTarget,
+        binary_path: &PathBuf,
+    ) -> anyhow::Result<BundleResult> {
         match target {
             BundleTarget::LinuxAppImage => self.bundle_appimage(config, binary_path),
             BundleTarget::LinuxDeb => self.bundle_deb(config, binary_path),

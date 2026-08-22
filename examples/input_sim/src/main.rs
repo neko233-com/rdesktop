@@ -47,7 +47,12 @@ fn handle_sim(sim: &InputSimulator, msg: IpcMessage) -> IpcResponse {
             }
         }
         "simulate.key" => {
-            match msg.payload.get("key").and_then(|v| v.as_str()).and_then(Key::from_token) {
+            match msg
+                .payload
+                .get("key")
+                .and_then(|v| v.as_str())
+                .and_then(Key::from_token)
+            {
                 Some(k) => match sim.tap_key(k) {
                     Ok(()) => ok(serde_json::json!({ "key": k.to_string() })),
                     Err(e) => err(e.to_string()),
@@ -98,7 +103,11 @@ fn handle_sim(sim: &InputSimulator, msg: IpcMessage) -> IpcResponse {
             }
         }
         "simulate.scroll" => {
-            let delta = msg.payload.get("delta").and_then(|v| v.as_i64()).unwrap_or(120) as i32;
+            let delta = msg
+                .payload
+                .get("delta")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(120) as i32;
             match sim.scroll(delta) {
                 Ok(()) => ok(serde_json::json!({ "delta": delta })),
                 Err(e) => err(e.to_string()),
@@ -124,9 +133,8 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let sim = Arc::new(
-        InputSimulator::new().expect("input simulation is unsupported on this platform"),
-    );
+    let sim =
+        Arc::new(InputSimulator::new().expect("input simulation is unsupported on this platform"));
     let handler_sim = sim.clone();
     let handler = FnIpcHandler::new(move |msg: IpcMessage| handle_sim(&handler_sim, msg));
 

@@ -160,17 +160,25 @@ stopped = requests.post("http://localhost:1420/__rdesktop__/agent/recording/stop
 ```
 GET  /__rdesktop__/agent/dom          # 完整 DOM 快照（JSON）
 GET  /__rdesktop__/agent/elements     # 按 CSS 选择器查询元素
-POST /__rdesktop__/agent/action       # 执行 UI 操作（click/type/scroll）
+POST /__rdesktop__/agent/action       # 执行 UI 操作（click/type/scroll/press/drag）
 GET  /__rdesktop__/agent/state        # 应用状态快照
 POST /__rdesktop__/agent/ipc          # 向 Rust 后端发送 IPC 消息
-GET  /__rdesktop__/agent/screenshot   # 截图（委托给 Playwright）
+GET  /__rdesktop__/agent/screenshot   # 获取最新完整原生 PNG 帧
 GET  /__rdesktop__/agent/recording    # 唯一录制会话状态
 POST /__rdesktop__/agent/recording/start # 幂等开始录屏
 POST /__rdesktop__/agent/recording/stop  # 停止并 finalize 固定的 recording.mp4
 GET  /__rdesktop__/agent/recording/file  # 下载唯一录制文件
 ```
 
-开发服务器会自动注入 bridge，轮询前端文件变化并热重载页面。Windows 下录屏由
+开发服务器会自动注入 bridge，轮询前端文件变化并热重载页面。CEF 原生窗口的截图由
+rdesktop 帧发布器直接提供；`?wait=true&after=<generation>` 可等待下一张完整帧，避免读取到
+上一帧或正在写入的文件。`POST /__rdesktop__/agent/action?wait=true` 会在动作入队后等待
+新的原生帧再返回，适合验证菜单、终端、分隔条和拖拽后的真实视觉状态。结构化动作支持
+`click`、`double_click`、`right_click`、`type`、`fill`、`clear`、`scroll`、`hover`、
+`focus`、`select`、`press` 和 `drag`。拖拽可使用 `selector` + `target_selector`，或
+`from` + `to` 坐标；桥接层会发送 pointer/mouse 按下、移动、释放以及 dragover/drop 事件。
+
+Windows 下录屏由
 开发服务器原生捕获整个虚拟桌面，并使用系统自带的 Media Foundation H.264 编码为
 `.rdesktop/recording.mp4`；agent 不需要处理浏览器授权，也不需要安装或打包 ffmpeg。
 `start` 接受可选的 `fps`（1–60）和 `max_duration_seconds`（默认 300 秒，最多 3600 秒），

@@ -22,7 +22,11 @@ impl WindowsBundler {
 
     /// Create a portable Windows executable.
     /// This embeds all resources into a single .exe file.
-    fn bundle_portable(&self, config: &AppConfig, binary_path: &Path) -> anyhow::Result<BundleResult> {
+    fn bundle_portable(
+        &self,
+        config: &AppConfig,
+        binary_path: &Path,
+    ) -> anyhow::Result<BundleResult> {
         let output_dir = PathBuf::from("target/release/bundle/windows");
         std::fs::create_dir_all(&output_dir)?;
 
@@ -55,7 +59,11 @@ impl WindowsBundler {
         let output_dir = PathBuf::from("target/release/bundle/nsis");
         std::fs::create_dir_all(&output_dir)?;
 
-        let installer_name = format!("{}-{}-setup.exe", config.name.replace(' ', "_"), config.version);
+        let installer_name = format!(
+            "{}-{}-setup.exe",
+            config.name.replace(' ', "_"),
+            config.version
+        );
         let output_path = output_dir.join(&installer_name);
 
         // Generate NSIS script
@@ -106,7 +114,11 @@ impl WindowsBundler {
         })
     }
 
-    fn generate_nsis_script(&self, config: &AppConfig, _binary_path: &Path) -> anyhow::Result<String> {
+    fn generate_nsis_script(
+        &self,
+        config: &AppConfig,
+        _binary_path: &Path,
+    ) -> anyhow::Result<String> {
         let icon_line = config
             .bundle
             .icon
@@ -175,7 +187,11 @@ SectionEnd
         ))
     }
 
-    fn generate_wix_manifest(&self, config: &AppConfig, _binary_path: &Path) -> anyhow::Result<String> {
+    fn generate_wix_manifest(
+        &self,
+        config: &AppConfig,
+        _binary_path: &Path,
+    ) -> anyhow::Result<String> {
         Ok(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -217,7 +233,12 @@ SectionEnd
 }
 
 impl Bundler for WindowsBundler {
-    fn bundle(&self, config: &AppConfig, target: &BundleTarget, binary_path: &PathBuf) -> anyhow::Result<BundleResult> {
+    fn bundle(
+        &self,
+        config: &AppConfig,
+        target: &BundleTarget,
+        binary_path: &PathBuf,
+    ) -> anyhow::Result<BundleResult> {
         match target {
             BundleTarget::WindowsPortable => self.bundle_portable(config, binary_path),
             BundleTarget::WindowsNsis => self.bundle_nsis(config, binary_path),

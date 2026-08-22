@@ -19,7 +19,8 @@ impl MacHotkey {
     pub fn start(handler: Arc<dyn HotkeyHandler>) -> Result<Self> {
         let _ = handler;
         Err(RdesktopError::UnsupportedPlatform(
-            "global hotkeys on macOS require a CGEventTap implementation (pending macOS build)".into(),
+            "global hotkeys on macOS require a CGEventTap implementation (pending macOS build)"
+                .into(),
         ))
     }
 

@@ -8,11 +8,11 @@
 //! Unlike Tauri, all formats work out of the box without external tool dependencies
 //! where possible. NSIS and WiX are bundled as pre-built tools.
 
-pub mod config;
-pub mod windows;
-pub mod macos;
-pub mod linux;
 pub mod common;
+pub mod config;
+pub mod linux;
+pub mod macos;
+pub mod windows;
 
-pub use config::BundleTarget;
 pub use common::{BundleResult, Bundler};
+pub use config::BundleTarget;

@@ -115,7 +115,10 @@ impl MacOsBundler {
                 .bundle
                 .icon
                 .as_ref()
-                .map(|_| format!("<key>CFBundleIconFile</key>\n    <string>{}</string>", config.name))
+                .map(|_| format!(
+                    "<key>CFBundleIconFile</key>\n    <string>{}</string>",
+                    config.name
+                ))
                 .unwrap_or_default(),
             copyright_entry = config
                 .bundle
@@ -128,7 +131,12 @@ impl MacOsBundler {
 }
 
 impl Bundler for MacOsBundler {
-    fn bundle(&self, config: &AppConfig, target: &BundleTarget, binary_path: &PathBuf) -> anyhow::Result<BundleResult> {
+    fn bundle(
+        &self,
+        config: &AppConfig,
+        target: &BundleTarget,
+        binary_path: &PathBuf,
+    ) -> anyhow::Result<BundleResult> {
         match target {
             BundleTarget::MacOsApp => self.bundle_app(config, binary_path),
             BundleTarget::MacOsDmg => self.bundle_dmg(config, binary_path),

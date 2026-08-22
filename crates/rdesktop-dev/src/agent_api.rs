@@ -26,12 +26,14 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
+use rdesktop_core::ipc::{IpcMessage, IpcResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::server::{
-    DevServerState, RecordingSnapshot, RecordingStatus, DEFAULT_RECORDING_MAX_DURATION_SECONDS,
-    MAX_RECORDING_MAX_DURATION_SECONDS,
+    DevServerState, PublishedScreenshot, RecordingSnapshot, RecordingStatus,
+    DEFAULT_RECORDING_MAX_DURATION_SECONDS, MAX_RECORDING_MAX_DURATION_SECONDS,
 };
 
 /// Query parameters for element selection.
@@ -50,6 +52,10 @@ pub struct ElementQuery {
 /// An action that an agent can execute on the UI.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentAction {
+    /// Server-assigned ID used to correlate bridge execution receipts.
+    #[serde(default)]
+    pub id: Option<String>,
+
     /// The type of action
     pub action: ActionType,
 
@@ -61,6 +67,18 @@ pub struct AgentAction {
 
     /// Coordinates for scroll actions
     pub coordinates: Option<(f64, f64)>,
+
+    /// Optional destination element for a drag action.
+    pub target_selector: Option<String>,
+
+    /// Optional source point for coordinate-driven drag actions.
+    pub from: Option<(f64, f64)>,
+
+    /// Optional destination point for coordinate-driven drag actions.
+    pub to: Option<(f64, f64)>,
+
+    /// Optional duration for a drag action in milliseconds.
+    pub duration_ms: Option<u64>,
 }
 
 /// Types of actions agents can execute.
@@ -77,6 +95,14 @@ pub enum ActionType {
     Hover,
     Focus,
     Select,
+    Drag,
+    Press,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ActionQuery {
+    /// When true, wait until the native renderer publishes a newer frame.
+    pub wait: Option<bool>,
 }
 
 /// Response from a DOM query.
@@ -124,7 +150,7 @@ pub struct ElementInfo {
 }
 
 /// Result of an action execution.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ActionResult {
     /// Whether the action succeeded
     pub success: bool,
@@ -135,6 +161,17 @@ pub struct ActionResult {
     /// Any side effects (e.g., navigation that occurred)
     pub side_effects: Vec<String>,
 }
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ActionResultReport {
+    pub id: String,
+    pub success: bool,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub side_effects: Vec<String>,
+}
+
+static NEXT_ACTION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Optional request body for starting a recording. The server owns the
 /// recording identity; agents may safely send `{}` more than once.
@@ -232,24 +269,90 @@ pub async fn query_elements(
 /// The action is stored and picked up by the bridge script.
 pub async fn execute_action(
     State(state): State<DevServerState>,
+    Query(query): Query<ActionQuery>,
     Json(action): Json<AgentAction>,
 ) -> impl IntoResponse {
+    let action_id = format!(
+        "action-{}-{}",
+        timestamp(),
+        NEXT_ACTION_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut queued_action = action.clone();
+    queued_action.id = Some(action_id.clone());
+
     tracing::info!(
         action = ?action.action,
         selector = %action.selector,
+        action_id = %action_id,
         "Agent action received"
     );
 
-    state.pending_actions.lock().await.push(action.clone());
+    let before_generation = state.screenshot_publisher.generation();
+    let wait_for_paint = query.wait.unwrap_or(false);
+    if wait_for_paint {
+        state.action_waiters.lock().await.insert(action_id.clone());
+    }
+    state.pending_actions.lock().await.push(queued_action);
 
-    let result = ActionResult {
-        success: true,
-        error: None,
-        side_effects: vec![format!(
-            "Action {:?} on '{}' queued",
-            action.action, action.selector
-        )],
+    let bridge_result = if wait_for_paint {
+        wait_for_action_result(&state, &action_id, std::time::Duration::from_secs(5)).await
+    } else {
+        None
     };
+    if wait_for_paint {
+        state.action_waiters.lock().await.remove(&action_id);
+    }
+
+    let painted = if let Some(result) = bridge_result.as_ref() {
+        if !result.success {
+            false
+        } else {
+            // The bridge receipt proves that the DOM event was applied. Wait
+            // for a frame after that receipt as well, so wait=true means the
+            // native window has had an opportunity to paint the side effect.
+            let receipt_generation = state.screenshot_publisher.generation();
+            state
+                .screenshot_publisher
+                .wait_for_next(receipt_generation, std::time::Duration::from_secs(1))
+                .await
+                .is_some()
+        }
+    } else {
+        !wait_for_paint
+            || state
+                .screenshot_publisher
+                .wait_for_next(before_generation, std::time::Duration::from_secs(1))
+                .await
+                .is_some()
+    };
+
+    let result = bridge_result
+        .map(|mut result| {
+            if result.success && !painted {
+                result.success = false;
+                result.error = Some("bridge 已执行，但未在 1 秒内收到后续原生画面".to_string());
+            }
+            result
+        })
+        .unwrap_or_else(|| ActionResult {
+            success: painted,
+            error: if painted {
+                None
+            } else {
+                Some("动作已排队，但未在 5 秒内收到原生 bridge 回执".to_string())
+            },
+            side_effects: if painted {
+                vec![format!(
+                    "Action {:?} on '{}' queued and painted",
+                    action.action, action.selector
+                )]
+            } else {
+                vec![format!(
+                    "Action {:?} on '{}' queued",
+                    action.action, action.selector
+                )]
+            },
+        });
 
     Json(result).into_response()
 }
@@ -260,6 +363,52 @@ pub async fn execute_action(
 pub async fn pending_actions(State(state): State<DevServerState>) -> impl IntoResponse {
     let mut actions = state.pending_actions.lock().await;
     Json(std::mem::take(&mut *actions)).into_response()
+}
+
+/// POST /__rdesktop__/agent/action/result
+///
+/// Receive a real execution receipt from the injected bridge. Receipts are
+/// retained only for callers that explicitly requested `wait=true`.
+pub async fn report_action_result(
+    State(state): State<DevServerState>,
+    Json(report): Json<ActionResultReport>,
+) -> impl IntoResponse {
+    if state.action_waiters.lock().await.contains(&report.id) {
+        state.action_results.lock().await.insert(
+            report.id,
+            ActionResult {
+                success: report.success,
+                error: report.error,
+                side_effects: report.side_effects,
+            },
+        );
+        state.action_result_notify.notify_waiters();
+    }
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+async fn wait_for_action_result(
+    state: &DevServerState,
+    action_id: &str,
+    timeout: std::time::Duration,
+) -> Option<ActionResult> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(result) = state.action_results.lock().await.remove(action_id) {
+            return Some(result);
+        }
+        let notified = state.action_result_notify.notified();
+        if let Some(result) = state.action_results.lock().await.remove(action_id) {
+            return Some(result);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        if tokio::time::timeout(remaining, notified).await.is_err() {
+            return None;
+        }
+    }
 }
 
 /// GET /__rdesktop__/agent/state
@@ -282,9 +431,21 @@ pub async fn get_state(State(state): State<DevServerState>) -> impl IntoResponse
 ///
 /// Send an IPC message from the agent to the app.
 pub async fn send_ipc(
-    State(_state): State<DevServerState>,
+    State(state): State<DevServerState>,
     Json(message): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Some(handler) = state.ipc_handler.as_ref() {
+        let response = match serde_json::from_value::<IpcMessage>(message) {
+            Ok(message) => handler.handle(message),
+            Err(error) => IpcResponse {
+                id: "0".to_string(),
+                success: false,
+                data: serde_json::json!({ "error": format!("Invalid IPC message: {error}") }),
+            },
+        };
+        return Json(response).into_response();
+    }
+
     let cmd = message["cmd"].as_str().unwrap_or("unknown");
     let payload = message["payload"].clone();
     let id = message["id"].as_str().unwrap_or("0");
@@ -323,16 +484,62 @@ pub async fn send_ipc(
 
 /// GET /__rdesktop__/agent/screenshot
 ///
-/// Capture a screenshot. In browser mode, this delegates to the browser.
-pub async fn take_screenshot(State(_state): State<DevServerState>) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "message": "Screenshot not implemented in browser mode.",
-            "hint": "Use Playwright's page.screenshot() directly."
-        })),
-    )
+/// Query parameters for native screenshot retrieval.
+#[derive(Debug, Deserialize, Default)]
+pub struct ScreenshotQuery {
+    /// Wait for a newer frame than `after`.
+    pub wait: Option<bool>,
+    pub after: Option<u64>,
+}
+
+/// Capture the latest complete native PNG frame.
+pub async fn take_screenshot(
+    State(state): State<DevServerState>,
+    Query(query): Query<ScreenshotQuery>,
+) -> impl IntoResponse {
+    let frame = if query.wait.unwrap_or(false) {
+        let after = query
+            .after
+            .unwrap_or_else(|| state.screenshot_publisher.generation());
+        state
+            .screenshot_publisher
+            .wait_for_next(after, std::time::Duration::from_secs(5))
+            .await
+    } else {
+        state.screenshot_publisher.latest().await
+    };
+
+    let frame = match frame {
+        Some(frame) => Some(frame),
+        None if !query.wait.unwrap_or(false) => read_persisted_screenshot(&state).await,
+        None => None,
+    };
+
+    let Some(PublishedScreenshot { generation, png }) = frame else {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "no complete native screenshot frame is available yet".to_string(),
+        );
+    };
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/png")
+        .header("cache-control", "no-store")
+        .header("x-rdesktop-screenshot-generation", generation.to_string())
+        .body(axum::body::Body::from(png))
+        .expect("screenshot response is valid")
         .into_response()
+}
+
+async fn read_persisted_screenshot(state: &DevServerState) -> Option<PublishedScreenshot> {
+    let path = state.screenshot_path.as_ref()?;
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 16 * 1024 * 1024 {
+        return None;
+    }
+    let png = tokio::fs::read(path).await.ok()?;
+    Some(PublishedScreenshot { generation: 0, png })
 }
 
 /// GET /__rdesktop__/agent/recording

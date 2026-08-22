@@ -193,7 +193,8 @@ impl FromStr for Hotkey {
                 "shift" => modifiers.shift = true,
                 "meta" | "win" | "cmd" | "super" | "command" => modifiers.meta = true,
                 other => {
-                    key = Some(Key::from_token(other).ok_or_else(|| format!("unknown key: {tok}"))?);
+                    key =
+                        Some(Key::from_token(other).ok_or_else(|| format!("unknown key: {tok}"))?);
                 }
             }
         }
@@ -267,11 +268,15 @@ impl PlatformHotkey {
     fn start(handler: Arc<dyn HotkeyHandler>) -> Result<Self> {
         #[cfg(windows)]
         {
-            Ok(PlatformHotkey::Windows(crate::hotkeys_win::WinHotkey::start(handler)?))
+            Ok(PlatformHotkey::Windows(
+                crate::hotkeys_win::WinHotkey::start(handler)?,
+            ))
         }
         #[cfg(target_os = "macos")]
         {
-            Ok(PlatformHotkey::Macos(crate::hotkeys_mac::MacHotkey::start(handler)?))
+            Ok(PlatformHotkey::Macos(crate::hotkeys_mac::MacHotkey::start(
+                handler,
+            )?))
         }
         #[cfg(not(any(windows, target_os = "macos")))]
         {

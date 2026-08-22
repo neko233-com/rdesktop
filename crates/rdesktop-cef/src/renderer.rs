@@ -15,9 +15,10 @@ use rdesktop_core::Result;
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::input::{
-    DispatchKeyEventParams, DispatchMouseEventParams, MouseButton,
-    DispatchMouseEventType, DispatchKeyEventType,
+    DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
+    MouseButton,
 };
+use chromiumoxide::handler::viewport::Viewport;
 use chromiumoxide::page::Page;
 use futures::StreamExt;
 use tao::event::{ElementState, Event, StartCause, WindowEvent};
@@ -72,10 +73,14 @@ mod gdi {
     extern "system" {
         pub fn StretchDIBits(
             hdc: HDC,
-            x_dest: i32, y_dest: i32,
-            dest_width: i32, dest_height: i32,
-            x_src: i32, y_src: i32,
-            src_width: i32, src_height: i32,
+            x_dest: i32,
+            y_dest: i32,
+            dest_width: i32,
+            dest_height: i32,
+            x_src: i32,
+            y_src: i32,
+            src_width: i32,
+            src_height: i32,
             bits: *const c_void,
             bits_info: *const c_void,
             usage: u32,
@@ -108,6 +113,7 @@ pub struct CefRenderer {
     ipc_handler: Option<Arc<dyn IpcHandler>>,
     mod_shift: RefCell<bool>,
     mod_caps: RefCell<bool>,
+    screenshot_sink: Option<Arc<dyn Fn(&[u8], u32, u32) + Send + Sync>>,
     /// External outbox for native → frontend pushes (e.g. a Node extension
     /// host, or global hotkey / global input events). Drained every frame by
     /// the event loop, same contract as the WebView backend.
@@ -124,8 +130,15 @@ impl CefRenderer {
             ipc_handler: None,
             mod_shift: RefCell::new(false),
             mod_caps: RefCell::new(false),
+            screenshot_sink: None,
             outbox: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// Publish each complete CDP PNG frame to a native Agent or test sink.
+    /// The callback receives immutable bytes and the decoded frame dimensions.
+    pub fn set_screenshot_sink(&mut self, sink: Arc<dyn Fn(&[u8], u32, u32) + Send + Sync>) {
+        self.screenshot_sink = Some(sink);
     }
 
     /// Attach an external outbox so other runtimes (e.g. a Node extension host,
@@ -235,13 +248,15 @@ impl CefRenderer {
 
     #[cfg(target_os = "windows")]
     fn blit(window: &Window, pixels: &[u8], w: u32, h: u32) {
-        use tao::platform::windows::WindowExtWindows;
         use gdi::*;
+        use tao::platform::windows::WindowExtWindows;
 
         let hwnd = window.hwnd() as HWND;
         unsafe {
             let hdc = GetDC(hwnd);
-            if hdc.is_null() { return; }
+            if hdc.is_null() {
+                return;
+            }
 
             let bmi = BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -257,15 +272,24 @@ impl CefRenderer {
                 biClrImportant: 0,
             };
 
-            let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
             GetClientRect(hwnd, &mut rect);
 
             StretchDIBits(
                 hdc,
-                0, 0,
-                rect.right, rect.bottom,
-                0, 0,
-                w as i32, h as i32,
+                0,
+                0,
+                rect.right,
+                rect.bottom,
+                0,
+                0,
+                w as i32,
+                h as i32,
                 pixels.as_ptr() as *const _,
                 &bmi as *const _ as *const _,
                 DIB_RGB_COLORS,
@@ -283,7 +307,9 @@ impl CefRenderer {
 }
 
 impl Renderer for CefRenderer {
-    fn init(&mut self) -> Result<()> { Ok(()) }
+    fn init(&mut self) -> Result<()> {
+        Ok(())
+    }
 
     fn create_window(&mut self, config: &WindowConfig) -> Result<WindowHandle> {
         let id = self.alloc_id();
@@ -292,43 +318,86 @@ impl Renderer for CefRenderer {
     }
 
     fn load_url(&self, w: WindowHandle, url: &str) -> Result<()> {
-        self.pending_ops.borrow_mut().push(PendingOp::LoadUrl(w.id(), url.into())); Ok(())
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::LoadUrl(w.id(), url.into()));
+        Ok(())
     }
     fn load_html(&self, w: WindowHandle, html: &str) -> Result<()> {
-        self.pending_ops.borrow_mut().push(PendingOp::LoadHtml(w.id(), html.into())); Ok(())
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::LoadHtml(w.id(), html.into()));
+        Ok(())
     }
     fn eval_script(&self, w: WindowHandle, script: &str) -> Result<()> {
-        self.pending_ops.borrow_mut().push(PendingOp::EvalScript(w.id(), script.into())); Ok(())
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::EvalScript(w.id(), script.into()));
+        Ok(())
     }
     fn set_ipc_handler(&mut self, h: Box<dyn IpcHandler>) {
         self.ipc_handler = Some(Arc::from(h));
     }
     fn send_to_frontend(&self, w: WindowHandle, msg: &str) -> Result<()> {
-        self.pending_ops.borrow_mut().push(PendingOp::SendToFrontend(w.id(), msg.into())); Ok(())
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SendToFrontend(w.id(), msg.into()));
+        Ok(())
     }
-    fn set_title(&self, _w: WindowHandle, _t: &str) -> Result<()> { Ok(()) }
-    fn set_size(&self, _w: WindowHandle, _x: u32, _y: u32) -> Result<()> { Ok(()) }
-    fn set_resizable(&self, _w: WindowHandle, _r: bool) -> Result<()> { Ok(()) }
-    fn set_visible(&self, _w: WindowHandle, _v: bool) -> Result<()> { Ok(()) }
-    fn close_window(&mut self, _w: WindowHandle) -> Result<()> { Ok(()) }
-    fn minimize_window(&self, _w: WindowHandle) -> Result<()> { Ok(()) }
-    fn maximize_window(&self, _w: WindowHandle) -> Result<()> { Ok(()) }
-    fn is_maximized(&self, _w: WindowHandle) -> Result<bool> { Ok(false) }
-    fn set_fullscreen(&self, _w: WindowHandle, _f: bool) -> Result<()> { Ok(()) }
-    fn is_fullscreen(&self, _w: WindowHandle) -> Result<bool> { Ok(false) }
-    fn start_drag(&self, _w: WindowHandle) -> Result<()> { Ok(()) }
-    fn start_resize(&self, _w: WindowHandle, _e: ResizeEdge) -> Result<()> { Ok(()) }
-    fn set_decorations(&self, _w: WindowHandle, _d: bool) -> Result<()> { Ok(()) }
-    fn set_always_on_top(&self, _w: WindowHandle, _a: bool) -> Result<()> { Ok(()) }
+    fn set_title(&self, _w: WindowHandle, _t: &str) -> Result<()> {
+        Ok(())
+    }
+    fn set_size(&self, _w: WindowHandle, _x: u32, _y: u32) -> Result<()> {
+        Ok(())
+    }
+    fn set_resizable(&self, _w: WindowHandle, _r: bool) -> Result<()> {
+        Ok(())
+    }
+    fn set_visible(&self, _w: WindowHandle, _v: bool) -> Result<()> {
+        Ok(())
+    }
+    fn close_window(&mut self, _w: WindowHandle) -> Result<()> {
+        Ok(())
+    }
+    fn minimize_window(&self, _w: WindowHandle) -> Result<()> {
+        Ok(())
+    }
+    fn maximize_window(&self, _w: WindowHandle) -> Result<()> {
+        Ok(())
+    }
+    fn is_maximized(&self, _w: WindowHandle) -> Result<bool> {
+        Ok(false)
+    }
+    fn set_fullscreen(&self, _w: WindowHandle, _f: bool) -> Result<()> {
+        Ok(())
+    }
+    fn is_fullscreen(&self, _w: WindowHandle) -> Result<bool> {
+        Ok(false)
+    }
+    fn start_drag(&self, _w: WindowHandle) -> Result<()> {
+        Ok(())
+    }
+    fn start_resize(&self, _w: WindowHandle, _e: ResizeEdge) -> Result<()> {
+        Ok(())
+    }
+    fn set_decorations(&self, _w: WindowHandle, _d: bool) -> Result<()> {
+        Ok(())
+    }
+    fn set_always_on_top(&self, _w: WindowHandle, _a: bool) -> Result<()> {
+        Ok(())
+    }
 
     fn run(self: Box<Self>) -> Result<()> {
         tracing::info!("Chrome renderer starting");
 
-        let chrome_path = Self::find_chrome().ok_or_else(|| {
-            rdesktop_core::RdesktopError::Cef("Chrome not found".into())
-        })?;
+        let chrome_path = Self::find_chrome()
+            .ok_or_else(|| rdesktop_core::RdesktopError::Cef("Chrome not found".into()))?;
 
-        let pending_pages = self.pending_pages.borrow_mut().drain(..).collect::<Vec<_>>();
+        let pending_pages = self
+            .pending_pages
+            .borrow_mut()
+            .drain(..)
+            .collect::<Vec<_>>();
         let pending_ops = self.pending_ops.borrow_mut().drain(..).collect::<Vec<_>>();
 
         // External outbox for native → frontend pushes (Node extension host, etc.)
@@ -371,55 +440,111 @@ impl Renderer for CefRenderer {
 
         let rt = Runtime::new().map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
 
+        let (viewport_width, viewport_height) = pending_pages
+            .first()
+            .map(|(_, config)| (config.width, config.height))
+            .unwrap_or((800, 600));
         let cfg = BrowserConfig::builder()
             .chrome_executable(&chrome_path)
             .no_sandbox()
             .new_headless_mode()
+            .window_size(viewport_width, viewport_height)
+            .viewport(Viewport {
+                width: viewport_width,
+                height: viewport_height,
+                device_scale_factor: Some(1.0),
+                emulating_mobile: false,
+                is_landscape: viewport_width >= viewport_height,
+                has_touch: false,
+            })
             .build()
             .map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
 
-        let (browser, mut handler) = rt.block_on(async {
-            Browser::launch(cfg).await
-        }).map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
+        let (browser, mut handler) = rt
+            .block_on(async { Browser::launch(cfg).await })
+            .map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
 
         rt.spawn(async move { while let Some(_) = handler.next().await {} });
+
+        let screenshot_sink = self.screenshot_sink.clone();
 
         // Create Chrome pages
         let mut pages: Vec<(u64, ChromePage)> = Vec::new();
         for (rd_id, wc) in &pending_pages {
-            let page = rt.block_on(async {
-                browser.new_page("about:blank").await
-            }).map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
+            let page = rt
+                .block_on(async { browser.new_page("about:blank").await })
+                .map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
 
-            rt.block_on(async { let _ = page.evaluate(Self::bridge_script()).await; });
+            rt.block_on(async {
+                let _ = page.evaluate(Self::bridge_script()).await;
+            });
 
-            let pixels = rt.block_on(async {
+            let screenshot = rt.block_on(async {
                 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotParams;
-                let bytes = page.screenshot(CaptureScreenshotParams::builder().build()).await.ok()?;
-                let (_, _, bgra) = Self::decode_png(&bytes)?;
-                Some(bgra)
-            }).unwrap_or_else(|| vec![0u8; (wc.width * wc.height * 4) as usize]);
+                page.screenshot(CaptureScreenshotParams::builder().build())
+                    .await
+                    .ok()
+            });
+            let (width, height, pixels) = screenshot
+                .as_deref()
+                .and_then(Self::decode_png)
+                .unwrap_or_else(|| {
+                    (
+                        wc.width,
+                        wc.height,
+                        vec![0u8; (wc.width * wc.height * 4) as usize],
+                    )
+                });
+            if let (Some(sink), Some(bytes)) = (screenshot_sink.as_ref(), screenshot.as_deref()) {
+                sink(bytes, width, height);
+            }
 
-            pages.push((*rd_id, ChromePage {
-                page, width: wc.width, height: wc.height, pixels, mouse_pos: (0.0, 0.0),
-            }));
+            pages.push((
+                *rd_id,
+                ChromePage {
+                    page,
+                    width,
+                    height,
+                    pixels,
+                    mouse_pos: (0.0, 0.0),
+                },
+            ));
         }
 
         // Process pending ops
         for op in &pending_ops {
-            let page = pages.iter().find(|(id, _)| match op {
-                PendingOp::LoadUrl(i, _) | PendingOp::LoadHtml(i, _)
-                | PendingOp::EvalScript(i, _) | PendingOp::SendToFrontend(i, _) => id == i,
-            }).map(|(_, p)| &p.page);
+            let page = pages
+                .iter()
+                .find(|(id, _)| match op {
+                    PendingOp::LoadUrl(i, _)
+                    | PendingOp::LoadHtml(i, _)
+                    | PendingOp::EvalScript(i, _)
+                    | PendingOp::SendToFrontend(i, _) => id == i,
+                })
+                .map(|(_, p)| &p.page);
             let Some(page) = page else { continue };
             match op {
-                PendingOp::LoadUrl(_, url) => { rt.block_on(async { let _ = page.goto(url.as_str()).await; }); }
-                PendingOp::LoadHtml(_, html) => { rt.block_on(async { let _ = page.set_content(html.as_str()).await; }); }
-                PendingOp::EvalScript(_, script) => { rt.block_on(async { let _ = page.evaluate(script.as_str()).await; }); }
+                PendingOp::LoadUrl(_, url) => {
+                    rt.block_on(async {
+                        let _ = page.goto(url.as_str()).await;
+                    });
+                }
+                PendingOp::LoadHtml(_, html) => {
+                    rt.block_on(async {
+                        let _ = page.set_content(html.as_str()).await;
+                    });
+                }
+                PendingOp::EvalScript(_, script) => {
+                    rt.block_on(async {
+                        let _ = page.evaluate(script.as_str()).await;
+                    });
+                }
                 PendingOp::SendToFrontend(_, msg) => {
                     if let Ok(js) = serde_json::to_string(msg) {
                         let s = format!("window.__RDESKTOP_IPC__({js})");
-                        rt.block_on(async { let _ = page.evaluate(s.as_str()).await; });
+                        rt.block_on(async {
+                            let _ = page.evaluate(s.as_str()).await;
+                        });
                     }
                 }
             }
@@ -448,7 +573,10 @@ impl Renderer for CefRenderer {
                             .build(el_target)
                         {
                             Ok(w) => w,
-                            Err(e) => { tracing::error!("Window: {}", e); continue; }
+                            Err(e) => {
+                                tracing::error!("Window: {}", e);
+                                continue;
+                            }
                         };
 
                         if let Some((_, p)) = pages.iter().find(|(id, _)| id == rd_id) {
@@ -465,19 +593,35 @@ impl Renderer for CefRenderer {
                     }
                 }
 
-                Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, window_id, .. } => {
+                Event::WindowEvent {
+                    event: WindowEvent::CursorMoved { position, .. },
+                    window_id,
+                    ..
+                } => {
                     if let Some((_, rd_id)) = tao_windows.get(&window_id) {
                         if let Some((_, p)) = pages.iter_mut().find(|(id, _)| id == rd_id) {
                             p.mouse_pos = (position.x, position.y);
                             let params = DispatchMouseEventParams::builder()
                                 .r#type(DispatchMouseEventType::MouseMoved)
-                                .x(position.x).y(position.y).build().unwrap();
-                            rt.block_on(async { let _ = p.page.execute(params).await; });
+                                .x(position.x)
+                                .y(position.y)
+                                .build()
+                                .unwrap();
+                            rt.block_on(async {
+                                let _ = p.page.execute(params).await;
+                            });
                         }
                     }
                 }
 
-                Event::WindowEvent { event: WindowEvent::MouseInput { state: bs, button, .. }, window_id, .. } => {
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::MouseInput {
+                            state: bs, button, ..
+                        },
+                    window_id,
+                    ..
+                } => {
                     if let Some((_, rd_id)) = tao_windows.get(&window_id) {
                         if let Some((_, p)) = pages.iter().find(|(id, _)| id == rd_id) {
                             let mt = match bs {
@@ -492,29 +636,56 @@ impl Renderer for CefRenderer {
                                 _ => return,
                             };
                             let params = DispatchMouseEventParams::builder()
-                                .r#type(mt).x(p.mouse_pos.0).y(p.mouse_pos.1).button(mb).build().unwrap();
-                            rt.block_on(async { let _ = p.page.execute(params).await; });
+                                .r#type(mt)
+                                .x(p.mouse_pos.0)
+                                .y(p.mouse_pos.1)
+                                .button(mb)
+                                .build()
+                                .unwrap();
+                            rt.block_on(async {
+                                let _ = p.page.execute(params).await;
+                            });
                         }
                     }
                 }
 
-                Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, window_id, .. } => {
+                Event::WindowEvent {
+                    event: WindowEvent::MouseWheel { delta, .. },
+                    window_id,
+                    ..
+                } => {
                     if let Some((_, rd_id)) = tao_windows.get(&window_id) {
                         if let Some((_, p)) = pages.iter().find(|(id, _)| id == rd_id) {
                             let (dx, dy) = match delta {
-                                tao::event::MouseScrollDelta::LineDelta(dx, dy) => (dx as f64 * 50.0, dy as f64 * 50.0),
+                                tao::event::MouseScrollDelta::LineDelta(dx, dy) => {
+                                    (dx as f64 * 50.0, dy as f64 * 50.0)
+                                }
                                 tao::event::MouseScrollDelta::PixelDelta(pos) => (pos.x, pos.y),
                                 _ => (0.0, 0.0),
                             };
                             let params = DispatchMouseEventParams::builder()
-                                .r#type(DispatchMouseEventType::MouseWheel).x(p.mouse_pos.0).y(p.mouse_pos.1)
-                                .delta_x(dx).delta_y(dy).build().unwrap();
-                            rt.block_on(async { let _ = p.page.execute(params).await; });
+                                .r#type(DispatchMouseEventType::MouseWheel)
+                                .x(p.mouse_pos.0)
+                                .y(p.mouse_pos.1)
+                                .delta_x(dx)
+                                .delta_y(dy)
+                                .build()
+                                .unwrap();
+                            rt.block_on(async {
+                                let _ = p.page.execute(params).await;
+                            });
                         }
                     }
                 }
 
-                Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key_event, .. }, window_id, .. } => {
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event: key_event, ..
+                        },
+                    window_id,
+                    ..
+                } => {
                     if let Some((_, rd_id)) = tao_windows.get(&window_id) {
                         if let Some((_, p)) = pages.iter().find(|(id, _)| id == rd_id) {
                             let ts = match key_event.state {
@@ -527,8 +698,11 @@ impl Renderer for CefRenderer {
                             // Track modifier state so CDP receives the correct
                             // character in `text` (e.g. Shift+1 => "!", Shift+a => "A").
                             if physical == "ShiftLeft" || physical == "ShiftRight" {
-                                *self.mod_shift.borrow_mut() = matches!(ts, DispatchKeyEventType::KeyDown);
-                            } else if physical == "CapsLock" && matches!(ts, DispatchKeyEventType::KeyDown) {
+                                *self.mod_shift.borrow_mut() =
+                                    matches!(ts, DispatchKeyEventType::KeyDown);
+                            } else if physical == "CapsLock"
+                                && matches!(ts, DispatchKeyEventType::KeyDown)
+                            {
                                 let mut c = self.mod_caps.borrow_mut();
                                 *c = !*c;
                             }
@@ -545,19 +719,29 @@ impl Renderer for CefRenderer {
                             } else {
                                 params_builder.build().unwrap()
                             };
-                            rt.block_on(async { let _ = p.page.execute(params).await; });
+                            rt.block_on(async {
+                                let _ = p.page.execute(params).await;
+                            });
                         }
                     }
                 }
 
-                Event::WindowEvent { event: WindowEvent::CloseRequested, window_id, .. } => {
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    window_id,
+                    ..
+                } => {
                     if let Some((_, rd_id)) = tao_windows.remove(&window_id) {
                         if let Some(idx) = pages.iter().position(|(id, _)| *id == rd_id) {
                             let (_, p) = pages.remove(idx);
-                            rt.block_on(async { let _ = p.page.close().await; });
+                            rt.block_on(async {
+                                let _ = p.page.close().await;
+                            });
                         }
                     }
-                    if tao_windows.is_empty() { *cf = ControlFlow::Exit; }
+                    if tao_windows.is_empty() {
+                        *cf = ControlFlow::Exit;
+                    }
                 }
 
                 Event::MainEventsCleared => {
@@ -565,9 +749,14 @@ impl Renderer for CefRenderer {
                     for (_, p) in pages.iter_mut() {
                         use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotParams;
                         if let Ok(bytes) = rt.block_on(async {
-                            p.page.screenshot(CaptureScreenshotParams::builder().build()).await
+                            p.page
+                                .screenshot(CaptureScreenshotParams::builder().build())
+                                .await
                         }) {
                             if let Some((w, h, bgra)) = Self::decode_png(&bytes) {
+                                if let Some(sink) = screenshot_sink.as_ref() {
+                                    sink(&bytes, w, h);
+                                }
                                 p.pixels = bgra;
                                 p.width = w;
                                 p.height = h;
@@ -578,14 +767,20 @@ impl Renderer for CefRenderer {
                     // Frontend → backend IPC: drain queued invokes and dispatch to the handler
                     if let Some(handler) = self.ipc_handler.as_ref() {
                         for (_, p) in pages.iter() {
-                            if let Ok(value) = rt.block_on(p.page.evaluate("window.__rdesktop_take__()")) {
+                            if let Ok(value) =
+                                rt.block_on(p.page.evaluate("window.__rdesktop_take__()"))
+                            {
                                 if let Some(raw) = value.value().and_then(|v| v.as_str()) {
-                                    if let Ok(messages) = serde_json::from_str::<Vec<IpcMessage>>(raw) {
+                                    if let Ok(messages) =
+                                        serde_json::from_str::<Vec<IpcMessage>>(raw)
+                                    {
                                         for msg in messages {
                                             let response = handler.handle(msg);
                                             if let Ok(json) = serde_json::to_string(&response) {
-                                                let script = format!("window.__RDESKTOP_IPC__({})", json);
-                                                let _ = rt.block_on(p.page.evaluate(script.as_str()));
+                                                let script =
+                                                    format!("window.__RDESKTOP_IPC__({})", json);
+                                                let _ =
+                                                    rt.block_on(p.page.evaluate(script.as_str()));
                                             }
                                         }
                                     }
@@ -630,13 +825,17 @@ impl Renderer for CefRenderer {
                     }
                 }
 
-                Event::LoopDestroyed => { tracing::info!("Chrome renderer destroyed"); }
+                Event::LoopDestroyed => {
+                    tracing::info!("Chrome renderer destroyed");
+                }
                 _ => {}
             }
         });
     }
 
-    fn kind(&self) -> RendererKind { RendererKind::Chrome }
+    fn kind(&self) -> RendererKind {
+        RendererKind::Chrome
+    }
 }
 
 /// Map a winit `KeyCode` debug name (e.g. "KeyA", "Digit1", "Enter") to the
@@ -648,14 +847,22 @@ impl Renderer for CefRenderer {
 fn cdp_key_event(code: &str, shift: bool, caps: bool) -> (String, Option<String>) {
     if let Some(c) = code.strip_prefix("Key") {
         let upper = shift ^ caps;
-        let ch = if upper { c.to_uppercase() } else { c.to_lowercase() };
+        let ch = if upper {
+            c.to_uppercase()
+        } else {
+            c.to_lowercase()
+        };
         return (ch.clone(), Some(ch));
     }
     if let Some(d) = code.strip_prefix("Digit") {
         const SHIFTED: &[&str] = &[")", "!", "@", "#", "$", "%", "^", "&", "*", "("];
         if let Ok(idx) = d.parse::<usize>() {
             if idx < SHIFTED.len() {
-                let s = if shift { SHIFTED[idx].to_string() } else { d.to_string() };
+                let s = if shift {
+                    SHIFTED[idx].to_string()
+                } else {
+                    d.to_string()
+                };
                 return (s.clone(), Some(s));
             }
         }

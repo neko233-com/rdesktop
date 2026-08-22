@@ -67,41 +67,157 @@
         }
     }
 
+    async function reportActionResult(action, success, error) {
+        if (!action.id) return;
+        await postJson(`${RDESKTOP_BASE}/agent/action/result`, {
+            id: action.id,
+            success,
+            error: error ? String(error) : null,
+            side_effects: success ? ['bridge action applied'] : [],
+        }).catch(() => {});
+    }
+
     function executeAction(action) {
         const el = action.selector ? document.querySelector(action.selector) : null;
-        if (!el && action.action !== 'scroll') {
+        if (!el && !['scroll', 'press'].includes(action.action)) {
             console.warn('[rdesktop] Element not found:', action.selector);
+            void reportActionResult(action, false, `Element not found: ${action.selector}`);
             return;
         }
-        switch (action.action) {
-            case 'click': el.click(); break;
-            case 'double_click': el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); break;
-            case 'right_click': el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })); break;
-            case 'type':
-                el.focus();
-                el.value = (el.value || '') + (action.value || '');
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                break;
-            case 'fill':
-                el.focus();
-                el.value = action.value || '';
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                break;
-            case 'clear':
-                el.focus();
-                el.value = '';
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                break;
-            case 'scroll':
-                window.scrollBy((action.coordinates || [0, 0])[0], (action.coordinates || [0, 0])[1]);
-                break;
-            case 'hover': el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true })); break;
-            case 'focus': el.focus(); break;
-            case 'select':
-                el.value = action.value || '';
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                break;
-            default: console.warn('[rdesktop] Unknown action:', action.action);
+
+        function dispatchPointer(target, type, point, buttons) {
+            if (!target) return;
+            const init = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: point.x,
+                clientY: point.y,
+                button: 0,
+                buttons: buttons || 0,
+                pointerId: 1,
+                pointerType: 'mouse',
+                isPrimary: true,
+            };
+            const PointerCtor = window.PointerEvent || window.MouseEvent;
+            target.dispatchEvent(new PointerCtor(type, init));
+        }
+
+        function dispatchMouse(target, type, point, buttons) {
+            if (!target) return;
+            target.dispatchEvent(new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: point.x,
+                clientY: point.y,
+                button: 0,
+                buttons: buttons || 0,
+            }));
+        }
+
+        function centerOf(target) {
+            const rect = target.getBoundingClientRect();
+            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        }
+
+        function dispatchDragEvent(target, type, point, dataTransfer) {
+            if (!target) return;
+            const init = {
+                bubbles: true,
+                cancelable: true,
+                clientX: point.x,
+                clientY: point.y,
+                dataTransfer,
+            };
+            if (window.DragEvent) {
+                target.dispatchEvent(new DragEvent(type, init));
+            } else {
+                target.dispatchEvent(new CustomEvent(type, { bubbles: true, cancelable: true, detail: init }));
+            }
+        }
+
+        function drag(source, action) {
+            const target = action.target_selector ? document.querySelector(action.target_selector) : source;
+            if (!target) {
+                throw new Error(`Drag target not found: ${action.target_selector}`);
+            }
+            const from = action.from ? { x: action.from[0], y: action.from[1] } : centerOf(source);
+            const to = action.to ? { x: action.to[0], y: action.to[1] } : centerOf(target);
+            const duration = Math.max(0, Math.min(1000, Number(action.duration_ms || 0)));
+            const steps = Math.max(2, Math.min(30, Math.ceil(duration / 16) || 6));
+            const dataTransfer = typeof DataTransfer === 'function' ? new DataTransfer() : null;
+
+            dispatchPointer(source, 'pointerover', from, 0);
+            dispatchMouse(source, 'mouseover', from, 0);
+            dispatchDragEvent(source, 'dragstart', from, dataTransfer);
+            dispatchPointer(source, 'pointerdown', from, 1);
+            dispatchMouse(source, 'mousedown', from, 1);
+            for (let index = 1; index <= steps; index += 1) {
+                const ratio = index / steps;
+                const point = {
+                    x: from.x + (to.x - from.x) * ratio,
+                    y: from.y + (to.y - from.y) * ratio,
+                };
+                dispatchPointer(document, 'pointermove', point, 1);
+                dispatchMouse(document, 'mousemove', point, 1);
+                dispatchDragEvent(target, 'dragover', point, dataTransfer);
+            }
+            dispatchDragEvent(target, 'drop', to, dataTransfer);
+            dispatchPointer(target, 'pointerup', to, 0);
+            dispatchMouse(target, 'mouseup', to, 0);
+            dispatchDragEvent(source, 'dragend', to, dataTransfer);
+        }
+
+        function press(target, value) {
+            const key = value || 'Enter';
+            const eventInit = { key, code: key, bubbles: true, cancelable: true };
+            const receiver = target || document.activeElement || document;
+            receiver.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+            receiver.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+        }
+
+        try {
+            switch (action.action) {
+                case 'click': el.click(); break;
+                case 'double_click': el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); break;
+                case 'right_click': el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })); break;
+                case 'type':
+                    el.focus();
+                    el.value = (el.value || '') + (action.value || '');
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    break;
+                case 'fill':
+                    el.focus();
+                    el.value = action.value || '';
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    break;
+                case 'clear':
+                    el.focus();
+                    el.value = '';
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    break;
+                case 'scroll':
+                    (el || window).scrollBy((action.coordinates || [0, 0])[0], (action.coordinates || [0, 0])[1]);
+                    break;
+                case 'hover':
+                    dispatchPointer(el, 'pointerover', centerOf(el), 0);
+                    dispatchMouse(el, 'mouseover', centerOf(el), 0);
+                    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                    break;
+                case 'focus': el.focus(); break;
+                case 'select':
+                    el.value = action.value || '';
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                case 'drag': drag(el, action); break;
+                case 'press': press(el, action.value); break;
+                default: throw new Error(`Unknown action: ${action.action}`);
+            }
+            void reportActionResult(action, true, null);
+        } catch (error) {
+            console.warn('[rdesktop] Action failed:', error);
+            void reportActionResult(action, false, error && error.message ? error.message : error);
         }
     }
 

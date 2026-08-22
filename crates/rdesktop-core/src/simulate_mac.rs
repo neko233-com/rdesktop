@@ -21,7 +21,8 @@ impl MacSim {
 
     fn unsupported<T>() -> Result<T> {
         Err(RdesktopError::UnsupportedPlatform(
-            "macOS input simulation is not yet implemented (CGEvent pending real macOS build)".into(),
+            "macOS input simulation is not yet implemented (CGEvent pending real macOS build)"
+                .into(),
         ))
     }
 

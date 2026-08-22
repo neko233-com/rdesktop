@@ -17,11 +17,7 @@ pub enum Event {
     },
 
     /// Window was moved
-    WindowMoved {
-        window_id: u64,
-        x: i32,
-        y: i32,
-    },
+    WindowMoved { window_id: u64, x: i32, y: i32 },
 
     /// Window gained focus
     WindowFocused { window_id: u64 },
@@ -30,11 +26,11 @@ pub enum Event {
     WindowUnfocused { window_id: u64 },
 
     /// File was dropped on the window
-    FileDrop {
-        window_id: u64,
-        paths: Vec<String>,
-    },
+    FileDrop { window_id: u64, paths: Vec<String> },
 
     /// Custom event from the renderer
-    Custom { name: String, data: serde_json::Value },
+    Custom {
+        name: String,
+        data: serde_json::Value,
+    },
 }

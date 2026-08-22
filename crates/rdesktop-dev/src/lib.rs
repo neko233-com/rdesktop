@@ -30,8 +30,8 @@
 //! - `POST /__rdesktop__/agent/recording/stop` - Stop and finalize the recording
 //! - `GET /__rdesktop__/agent/recording/file` - Download the finalized recording
 
-pub mod server;
 pub mod agent_api;
 mod native_recorder;
+pub mod server;
 
-pub use server::DevServer;
+pub use server::{DevServer, PublishedScreenshot, ScreenshotPublisher};

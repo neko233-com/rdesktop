@@ -20,5 +20,10 @@ pub struct BundleResult {
 /// Trait for platform-specific bundlers.
 pub trait Bundler {
     /// Bundle the application for the given target.
-    fn bundle(&self, config: &AppConfig, target: &BundleTarget, binary_path: &PathBuf) -> anyhow::Result<BundleResult>;
+    fn bundle(
+        &self,
+        config: &AppConfig,
+        target: &BundleTarget,
+        binary_path: &PathBuf,
+    ) -> anyhow::Result<BundleResult>;
 }

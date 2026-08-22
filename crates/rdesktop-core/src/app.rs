@@ -66,13 +66,11 @@ impl AppBuilder {
 
     /// Build the application.
     pub fn build(self) -> crate::Result<App> {
-        let renderer = self
-            .renderer
-            .ok_or_else(|| {
-                crate::RdesktopError::RendererInit(
-                    "No renderer provided. Use with_renderer().".to_string(),
-                )
-            })?;
+        let renderer = self.renderer.ok_or_else(|| {
+            crate::RdesktopError::RendererInit(
+                "No renderer provided. Use with_renderer().".to_string(),
+            )
+        })?;
 
         Ok(App {
             config: self.config,
