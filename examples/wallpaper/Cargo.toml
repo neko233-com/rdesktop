@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rdesktop-core = { version = "0.1.4", path = "../../crates/rdesktop-core" }
-rdesktop-webview = { version = "0.1.4", path = "../../crates/rdesktop-webview", optional = true }
-rdesktop-cef = { version = "0.1.4", path = "../../crates/rdesktop-cef", optional = true }
+rdesktop-core = { version = "0.1.5", path = "../../crates/rdesktop-core" }
+rdesktop-webview = { version = "0.1.5", path = "../../crates/rdesktop-webview", optional = true }
+rdesktop-cef = { version = "0.1.5", path = "../../crates/rdesktop-cef", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
