@@ -91,6 +91,21 @@ fn content_type(path: &Path) -> &'static str {
     }
 }
 
+/// Wry's Windows backend exposes custom protocols through an HTTP origin.
+/// Initial navigation applies this conversion internally, but subsequent
+/// `WebView::load_url` calls do not. Keep runtime navigation consistent with
+/// the initial page load so `rdesktop://localhost/...` works on WebView2 too.
+fn native_asset_url(url: &str, has_asset_root: bool) -> String {
+    #[cfg(target_os = "windows")]
+    if has_asset_root {
+        if let Some(rest) = url.strip_prefix("rdesktop://") {
+            return format!("http://rdesktop.{rest}");
+        }
+    }
+
+    url.to_string()
+}
+
 /// Pending operation queued before the event loop starts.
 enum PendingOp {
     LoadUrl(u64, String),
@@ -392,6 +407,26 @@ mod tests {
         });
 
         assert!(WebViewRenderer::parse_legacy_window_command(&raw, 1).is_some());
+    }
+
+    #[test]
+    fn normalizes_runtime_asset_navigation_for_the_native_backend() {
+        assert_eq!(
+            native_asset_url("rdesktop://localhost/index.html", true),
+            if cfg!(target_os = "windows") {
+                "http://rdesktop.localhost/index.html"
+            } else {
+                "rdesktop://localhost/index.html"
+            }
+        );
+        assert_eq!(
+            native_asset_url("https://example.com", true),
+            "https://example.com"
+        );
+        assert_eq!(
+            native_asset_url("rdesktop://localhost/index.html", false),
+            "rdesktop://localhost/index.html"
+        );
     }
 }
 
@@ -737,7 +772,7 @@ impl Renderer for WebViewRenderer {
 
                     // Process pending operations
                     for op in &pending_ops {
-                        Self::apply_op(op, &windows, &rdesktop_to_tao);
+                        Self::apply_op(op, &windows, &rdesktop_to_tao, asset_root.as_deref());
                     }
                 }
 
@@ -875,11 +910,13 @@ impl WebViewRenderer {
         op: &PendingOp,
         windows: &HashMap<WindowId, WindowEntry>,
         rdesktop_to_tao: &HashMap<u64, WindowId>,
+        asset_root: Option<&Path>,
     ) {
         match op {
             PendingOp::LoadUrl(rd_id, url) => {
                 if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    let _ = entry.webview.load_url(url);
+                    let native_url = native_asset_url(url, asset_root.is_some());
+                    let _ = entry.webview.load_url(&native_url);
                 }
             }
             PendingOp::LoadHtml(rd_id, html) => {
