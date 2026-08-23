@@ -1,286 +1,283 @@
 # rdesktop
 
-> Dual-engine Rust desktop framework. WebView by default, Chrome Embedded for pixel-perfect consistency. Built for the AI agent era.
+[![Crates.io](https://img.shields.io/crates/v/rdesktop-cli.svg)](https://crates.io/crates/rdesktop-cli)
+[![docs.rs](https://docs.rs/rdesktop-core/badge.svg)](https://docs.rs/rdesktop-core)
+[![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/neko233-com/rdesktop)
+[![GitHub stars](https://img.shields.io/github/stars/neko233-com/rdesktop.svg?style=social)](https://github.com/neko233-com/rdesktop)
 
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)](https://www.rust-lang.org/)
+**English** | [Chinese](README-CN.md)
 
----
+> An agent-first Rust desktop framework with interchangeable WebView and Chromium rendering backends.
 
-## 为什么又写一个桌面框架？
+rdesktop is designed for desktop applications whose UI is built with web technologies but whose development, testing, and native runtime need to remain observable and scriptable. It provides a common Rust API for windowing, rendering, IPC, input, hotkeys, and development-time visual verification.
 
-### Tauri v2 没有解决的问题
+## Project status
 
-Tauri 是一个优秀的框架，但在实际使用中存在几个无法回避的问题：
+rdesktop is an active `0.1.x` project. The browser-based development server, Agent API, renderer abstractions, and visual debugging workflow are the primary focus of the current release line. Native build and installer integrations are still evolving and should be evaluated for the target platform before being used in a production distribution pipeline.
 
-1. **跨平台渲染不一致**：Windows 用 WebView2 (Edge)，macOS 用 WKWebView (WebKit)，Linux 用 WebKitGTK。三个不同的渲染引擎，同一个 CSS 在三个平台上表现不同。对于需要像素级一致的产品，这是致命的。
+The project favors explicit behavior and a small, composable workspace over a single opaque runtime. APIs may change before `1.0.0`.
 
-2. **Windows 打包体验差**：NSIS/WiX 需要手动安装配置，没有内置的 EXE 直接输出。Tauri 的 bundler 经常因为环境问题失败。
+## Why rdesktop?
 
-3. **WebView2 运行时依赖**：Windows 上需要用户预装 WebView2 运行时（虽然 Win10+ 大多已预装，但企业环境不一定有）。
+Most desktop web frameworks optimize for one of two things: a small binary or maximum browser compatibility. rdesktop focuses on a third requirement: keeping the application inspectable throughout the agent-driven development loop.
 
-### opencode 为什么从 Tauri v2 切回 Electron
+- **Use the browser while developing.** Agents can inspect the DOM, query elements, execute structured actions, and read application state through HTTP.
+- **Keep native rendering available.** The same application model can target a system WebView or a Chromium-backed renderer.
+- **Verify what a person will see.** Native screenshots and Windows desktop MP4 recordings make visual regressions and interaction flows reviewable by both humans and agents.
+- **Keep platform behavior explicit.** Window state, IPC, global input, hotkeys, overlays, wallpaper windows, and click-through behavior are represented as Rust APIs and configuration.
 
-[opencode](https://github.com/nicedoc/opencode) 的开发者在使用 Tauri v2 后切回了 Electron，核心原因是：
+rdesktop is not intended to replace every desktop framework. A useful rule of thumb is:
 
-- 用户反馈不同平台上 UI 渲染有差异
-- 某些 CSS/JS 特性在不同 WebView 中行为不同
-- 调试跨平台渲染问题耗费大量开发时间
-- 最终结论：**对于终端用户产品，渲染一致性比包体积更重要**
+| Requirement | A reasonable fit |
+| --- | --- |
+| Small internal utility with minimal native integration | Tauri or a system WebView wrapper |
+| Existing Electron application and broad web compatibility | Electron |
+| Agent-observable development, renderer choice, and native desktop control | rdesktop |
 
-### rdesktop 的定位
+## Highlights
 
-**rdesktop 不是 Tauri 的替代品，而是补充。**
+### Interchangeable renderers
 
-| 场景 | 推荐方案 |
-|---|---|
-| 内部工具、原型、对像素不敏感 | **Tauri**（最轻量） |
-| 需要跨平台像素一致、终端用户产品 | **rdesktop**（双引擎可选） |
-| 已有 Electron 生态、需要最大兼容性 | **Electron**（最成熟） |
+The `rdesktop-core` crate defines the renderer and window abstractions used by the workspace.
 
-rdesktop 的核心价值：**让你在需要时可以切换到 Chrome 渲染，而不需要重写整个应用。**
-
----
-
-## 核心特性
-
-### 1. 双引擎渲染器
+- `rdesktop-webview` uses the platform WebView through `wry` and `tao`.
+- `rdesktop-cef` drives Chrome, Chromium, or Edge through the Chrome DevTools Protocol (CDP) for a consistent Chromium rendering path.
+- Application-level IPC and window operations are designed to remain independent of the selected renderer.
 
 ```toml
-# rdesktop.toml
 [renderer]
-kind = "webview"   # 默认：轻量，~5MB
-# kind = "chrome"  # 可选：像素一致，~150MB
+kind = "webview" # lightweight system WebView
+# kind = "chrome" # Chromium/CDP rendering path
 ```
 
-同一个 `Renderer` trait，两种实现。应用代码完全不变：
+The Chromium path requires a supported Chrome, Chromium, or Edge executable on the host. It is not a bundled CEF distribution.
 
-```rust
-// 无论用哪个引擎，代码完全一样
-renderer.load_url("https://my-app.com")?;
-renderer.eval_script("document.title")?;
-renderer.send_to_frontend("Hello from Rust")?;
-```
+### Agent-first development server
 
-### 2. Agent 优先开发
+`rdesktop dev` serves the frontend in a normal browser and injects the rdesktop bridge. This gives an agent a conventional browser target while keeping the application’s IPC and interaction model visible.
 
-rdesktop 的独特设计：**开发阶段用浏览器，生产阶段用原生窗口。**
+The development server supports:
 
-为什么？因为 AI Agent（Claude、GPT 等）有成熟的浏览器自动化能力（Playwright/Puppeteer MCP），但几乎没有原生桌面控制能力。
+- DOM snapshots and CSS-selector element queries;
+- structured actions such as click, type, fill, scroll, hover, focus, select, press, and drag;
+- application state snapshots and IPC requests;
+- hot reload when frontend files change;
+- native screenshot publication with optional wait-for-paint semantics;
+- a local HTTP API that works with Playwright, Puppeteer, MCP tools, or ordinary scripts.
 
-```
-开发阶段：rdesktop dev → 浏览器打开 → Agent 用 Playwright 调试
-生产阶段：rdesktop build → 原生窗口 → 用户使用
-```
+### Visual verification and recording
 
-Agent 可以：
-- 直接查询 DOM（不需要截图 + 视觉模型）
-- 精确执行操作（CSS 选择器，不是像素坐标）
-- 获取结构化状态（JSON，不是模糊的截图）
-- 通过 HTTP API 自动化测试
+The Agent API owns one recording session and one fixed output file per development server:
 
-### 3. 内置打包器
+- On Windows, the server captures the virtual desktop and encodes a real H.264 MP4 through GDI and Media Foundation.
+- No FFmpeg installation or runtime packaging is required for the Windows path.
+- Repeated `start` calls reuse the active session; repeated `stop` calls are safe.
+- The default maximum duration is five minutes; the hard limit is one hour.
+- Temporary files are cleaned after finalization, startup failure, and graceful shutdown.
+- On non-Windows platforms, the browser bridge provides a `MediaRecorder` fallback. The browser may require display-capture permission and may produce WebM rather than MP4.
 
-Tauri 需要手动安装 NSIS/WiX，rdesktop 内置：
+This bounded, idempotent design is intentional: an agent can retry a request without creating an unbounded collection of debug videos.
 
-| 平台 | 输出格式 | 命令 |
-|---|---|---|
-| Windows | .exe (NSIS), .msi (WiX), 免安装 EXE | `rdesktop bundle` |
-| macOS | .app, .dmg | `rdesktop bundle` |
-| Linux | AppImage, .deb, .rpm | `rdesktop bundle` |
+### Native desktop primitives
 
-### 4. 直接 EXE 输出
+The core workspace includes abstractions and platform implementations for:
+
+- normal, overlay, wallpaper, always-on-top, transparent, and click-through windows;
+- custom title-bar dragging and resizing;
+- native window icons;
+- global hotkeys and opt-in global input hooks;
+- structured IPC between Rust and the frontend.
+
+## Quick start
+
+### Install the CLI
 
 ```bash
-# 不需要安装 NSIS/WiX，直接输出可执行文件
-rdesktop bundle --target portable
-# → target/release/bundle/windows/MyApp.exe
+cargo install rdesktop-cli --version 0.1.5
 ```
 
----
-
-## Quick Start
+### Create a project
 
 ```bash
-# 安装 CLI
-cargo install rdesktop-cli
-
-# 创建项目
-rdesktop init my-app
-cd my-app
-
-# 开发模式（浏览器）
-rdesktop dev
-
-# 构建原生版本
-rdesktop build
-
-# 打包为安装程序
-rdesktop bundle
+rdesktop init hello-rdesktop
+cd hello-rdesktop
 ```
 
----
+The initializer creates a minimal `rdesktop.toml`, Rust entry point, and `frontend/index.html`.
 
-## Agent 开发工作流
-
-这是 rdesktop 的核心差异化能力：
-
-### 1. 启动开发服务器
+### Start the development server
 
 ```bash
 rdesktop dev
-# → http://localhost:1420
 ```
 
-### 2. Agent 通过 MCP 工具交互
-
-```python
-# Agent 使用 Playwright MCP
-page.goto("http://localhost:1420")
-page.click("button#submit")
-page.fill("input#name", "World")
-
-# 通过 Agent API 获取结构化数据
-import requests
-dom = requests.get("http://localhost:1420/__rdesktop__/agent/dom").json()
-state = requests.get("http://localhost:1420/__rdesktop__/agent/state").json()
-
-# 开始录制视觉调试视频（同一 dev server 永远只有一个录制会话）
-recording = requests.post(
-    "http://localhost:1420/__rdesktop__/agent/recording/start",
-    json={"fps": 30, "max_duration_seconds": 300},
-).json()
-# ...执行交互、热重载和视觉验证...
-stopped = requests.post("http://localhost:1420/__rdesktop__/agent/recording/stop", json={}).json()
-# 完成后下载：http://localhost:1420/__rdesktop__/agent/recording/file
-```
-
-### 3. Agent API 端点
-
-```
-GET  /__rdesktop__/agent/dom          # 完整 DOM 快照（JSON）
-GET  /__rdesktop__/agent/elements     # 按 CSS 选择器查询元素
-POST /__rdesktop__/agent/action       # 执行 UI 操作（click/type/scroll/press/drag）
-GET  /__rdesktop__/agent/state        # 应用状态快照
-POST /__rdesktop__/agent/ipc          # 向 Rust 后端发送 IPC 消息
-GET  /__rdesktop__/agent/screenshot   # 获取最新完整原生 PNG 帧
-GET  /__rdesktop__/agent/recording    # 唯一录制会话状态
-POST /__rdesktop__/agent/recording/start # 幂等开始录屏
-POST /__rdesktop__/agent/recording/stop  # 停止并 finalize 固定的 recording.mp4
-GET  /__rdesktop__/agent/recording/file  # 下载唯一录制文件
-```
-
-开发服务器会自动注入 bridge，轮询前端文件变化并热重载页面。CEF 原生窗口的截图由
-rdesktop 帧发布器直接提供；`?wait=true&after=<generation>` 可等待下一张完整帧，避免读取到
-上一帧或正在写入的文件。`POST /__rdesktop__/agent/action?wait=true` 会在动作入队后等待
-新的原生帧再返回，适合验证菜单、终端、分隔条和拖拽后的真实视觉状态。结构化动作支持
-`click`、`double_click`、`right_click`、`type`、`fill`、`clear`、`scroll`、`hover`、
-`focus`、`select`、`press` 和 `drag`。拖拽可使用 `selector` + `target_selector`，或
-`from` + `to` 坐标；桥接层会发送 pointer/mouse 按下、移动、释放以及 dragover/drop 事件。
-
-Windows 下录屏由
-开发服务器原生捕获整个虚拟桌面，并使用系统自带的 Media Foundation H.264 编码为
-`.rdesktop/recording.mp4`；agent 不需要处理浏览器授权，也不需要安装或打包 ffmpeg。
-`start` 接受可选的 `fps`（1–60）和 `max_duration_seconds`（默认 300 秒，最多 3600 秒），
-到时会自动停止；`stop` 可带 `session_id` 做并发保护。重复调用 `start/stop` 只会复用或
-返回同一个录制会话，不会产生第二个视频文件。原生录制期间的临时文件会在正常 finalize
-后清理，开发服务器启动、录制失败或 Ctrl+C 退出时也会清理/ finalize 残留临时文件。
-
-非 Windows 环境保留浏览器 bridge 的 `getDisplayMedia` + `MediaRecorder` 降级路径；
-这一路径可能要求用户选择窗口，并可能输出浏览器支持的 WebM。agent 应以
-`GET /__rdesktop__/agent/recording` 返回的 `native`、`mime_type` 和 `status` 为准。
-
-### 4. 从浏览器模式无缝切换到原生
+The server normally listens on `http://localhost:1420` and opens the browser automatically. To keep the process headless for an agent or CI job:
 
 ```bash
-# 开发时用浏览器
-rdesktop dev
-
-# 测试原生版本
-rdesktop build
-./target/release/my-app  # 同样的代码，原生窗口
+rdesktop dev --no-open
 ```
 
----
+Useful CLI commands are:
 
-## 架构
-
+```text
+rdesktop init <name>                 Create a project skeleton
+rdesktop dev [--path <dir>]         Run the browser development server
+rdesktop build [--chrome]           Build the native application path
+rdesktop bundle --target <target>   Generate a platform bundle
+rdesktop info                       Inspect rdesktop.toml
 ```
+
+The build and installer commands are under active development. Inspect their output and validate the generated artifact for your platform before distribution.
+
+## Configuration
+
+The generated project uses `rdesktop.toml`. A minimal development configuration looks like this:
+
+```toml
+[app]
+identifier = "com.example.hello"
+name = "hello-rdesktop"
+version = "0.1.0"
+
+[renderer]
+kind = "webview"
+webgpu = true
+
+[dev]
+host = "localhost"
+port = 1420
+open_browser = true
+hot_reload = true
+agent_mode = true
+devtools = true
+
+[window]
+title = "Hello rdesktop"
+width = 1280
+height = 720
+resizable = true
+
+[global_input]
+enabled = false
+keyboard = true
+mouse = true
+mouse_move = false
+```
+
+Keep `host = "localhost"` unless remote access is explicitly required. Setting it to `0.0.0.0` exposes the development and Agent endpoints to the network and should only be done on a trusted, isolated network.
+
+## Agent workflow
+
+The development server base URL is normally `http://localhost:1420`. The structured endpoints live below `/__rdesktop__/agent/`.
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/dom` | Read the latest DOM snapshot |
+| `GET` | `/elements?selector=...` | Query elements by selector, text, or role |
+| `POST` | `/action` | Queue a structured UI action |
+| `GET` | `/state` | Read the latest application state snapshot |
+| `POST` | `/ipc` | Send an IPC message to the frontend/backend bridge |
+| `GET` | `/screenshot` | Read a screenshot; `wait=true&after=<generation>` waits for a newer native frame |
+| `GET` | `/recording` | Read the single recording session state |
+| `POST` | `/recording/start` | Start or reuse the single recording |
+| `POST` | `/recording/stop` | Stop and finalize the recording |
+| `GET` | `/recording/file` | Download the finalized recording |
+
+Example interaction:
+
+```bash
+# Query a button
+curl "http://localhost:1420/__rdesktop__/agent/elements?selector=button"
+
+# Execute an action and wait for a new native frame when available
+curl -X POST "http://localhost:1420/__rdesktop__/agent/action?wait=true" \
+  -H "content-type: application/json" \
+  -d '{"action":"click","selector":"button#submit"}'
+
+# Start one bounded recording
+curl -X POST "http://localhost:1420/__rdesktop__/agent/recording/start" \
+  -H "content-type: application/json" \
+  -d '{"fps":30,"max_duration_seconds":300}'
+
+# Perform the flow, then finalize the same recording
+curl -X POST "http://localhost:1420/__rdesktop__/agent/recording/stop" \
+  -H "content-type: application/json" \
+  -d '{}'
+
+# Download the result
+curl -L "http://localhost:1420/__rdesktop__/agent/recording/file" -o recording.mp4
+```
+
+For a robust visual assertion, use the structured DOM/state endpoints first, perform an action, wait for the resulting native frame, and use the MP4 only as the durable review artifact. This keeps routine agent runs fast while preserving a human-readable trace when needed.
+
+## Workspace layout
+
+```text
 rdesktop/
 ├── crates/
-│   ├── rdesktop-core/      # 核心抽象（Renderer trait、IPC、Config）
-│   ├── rdesktop-webview/   # WebView 后端（WebView2/WebKit/WebKitGTK）
-│   ├── rdesktop-cef/       # Chrome Embedded 后端（CEF）
-│   ├── rdesktop-dev/       # 开发服务器（浏览器模式 + Agent API）
-│   ├── rdesktop-bundler/   # 跨平台打包器
-│   └── rdesktop-cli/       # CLI 工具
-└── examples/
-    └── hello_world/
+│   ├── rdesktop-core/       Shared types, renderer traits, IPC, input, and window APIs
+│   ├── rdesktop-webview/    WebView2/WebKit/WebKitGTK backend
+│   ├── rdesktop-cef/        Chromium/CDP backend
+│   ├── rdesktop-dev/        Browser dev server and Agent API
+│   ├── rdesktop-bundler/    Platform bundle abstractions and generators
+│   └── rdesktop-cli/        `rdesktop` command-line interface
+├── examples/                Small example applications
+├── test-app/                Local visual and interaction test fixture
+├── ARCHITECTURE.md          Design notes and subsystem boundaries
+└── README-CN.md             Chinese documentation
 ```
 
-### Renderer Trait
+## Platform notes
 
-```rust
-pub trait Renderer {
-    fn init(&mut self) -> Result<()>;
-    fn create_window(&mut self, config: &WindowConfig) -> Result<WindowHandle>;
-    fn load_url(&self, window: WindowHandle, url: &str) -> Result<()>;
-    fn load_html(&self, window: WindowHandle, html: &str) -> Result<()>;
-    fn eval_script(&self, window: WindowHandle, script: &str) -> Result<()>;
-    fn set_ipc_handler(&mut self, handler: Box<dyn IpcHandler>);
-    fn send_to_frontend(&self, window: WindowHandle, message: &str) -> Result<()>;
-    fn run(self: Box<Self>) -> Result<()>;
-}
+| Platform | System WebView | Chromium path | Native MP4 recording |
+| --- | --- | --- | --- |
+| Windows | WebView2 | Chrome/Chromium/Edge | Supported through GDI + Media Foundation |
+| macOS | WKWebView | Chrome/Chromium/Edge | Browser fallback |
+| Linux | WebKitGTK | Chrome/Chromium/Edge | Browser fallback |
+
+The exact runtime prerequisites depend on the selected backend. The WebView backend uses the operating system’s webview stack; the Chromium backend requires a locally available compatible browser. Mobile platforms are outside the current scope.
+
+## Build from source
+
+```bash
+git clone https://github.com/neko233-com/rdesktop.git
+cd rdesktop
+cargo check --workspace
+cargo test --workspace
+cargo run -p rdesktop-cli -- --help
 ```
 
-### IPC 通信
+For the Windows native recording path, build and run on Windows so the Media Foundation implementation is compiled and exercised by the target platform.
 
-```javascript
-// 前端 → 后端
-const result = await window.__RDESKTOP_INVOKE__('greet', { name: 'World' });
-```
+## Contributing
 
-```rust
-// 后端处理
-let handler = FnIpcHandler::new(|msg: IpcMessage| {
-    match msg.cmd.as_str() {
-        "greet" => IpcResponse {
-            id: msg.id,
-            success: true,
-            data: json!({ "message": format!("Hello, {}!", msg.payload["name"]) }),
-        },
-        _ => IpcResponse::error(msg.id, "Unknown command"),
-    }
-});
-```
+Contributions are welcome. Before opening a pull request:
 
----
+1. Read [ARCHITECTURE.md](ARCHITECTURE.md) and identify the affected crate.
+2. Keep public API changes focused and document behavior that agents or users can observe.
+3. Run `cargo fmt --all -- --check`.
+4. Run `cargo check --workspace` and `cargo test --workspace`.
+5. For Agent API or rendering changes, include a reproducible request sequence and explain how visual behavior was verified.
+6. Keep generated recordings, build output, credentials, and local test artifacts out of commits.
 
-## 平台支持
+Small documentation fixes are also valuable. Please use a clear commit message and describe platform-specific assumptions in the pull request.
 
-| 平台 | WebView | Chrome | 状态 |
-|---|---|---|---|
-| Windows 10/11 | WebView2 (Edge) | CEF | ✅ |
-| macOS 10.15+ | WKWebView | CEF | ✅ |
-| Linux (X11/Wayland) | WebKitGTK | CEF | ✅ |
+## Security and privacy
 
-> 移动端（iOS/Android）不在范围内，rdesktop 专注于桌面平台。
+The Agent API is a development interface, not an internet-facing service. It can inspect and manipulate the running application and can capture the desktop on supported platforms. Bind it to localhost by default, avoid exposing it on shared networks, and review recording contents before sharing them.
 
----
-
-## 与 Tauri 的关系
-
-rdesktop 大量借鉴了 Tauri 的设计（wry、tao、IPC 模式），在此基础上增加了：
-
-1. Chrome Embedded 作为可选渲染器
-2. 浏览器模式开发（Agent 优先）
-3. 内置打包器（不需要外部工具）
-4. 直接 EXE 输出
-
-如果你的项目用 Tauri 很满意，不需要切换。rdesktop 适合那些**需要跨平台渲染一致性**或**需要 AI Agent 参与开发**的场景。
-
----
+Please do not include credentials, private screenshots, or recordings containing sensitive information in issues or pull requests.
 
 ## License
 
-MIT OR Apache-2.0
+rdesktop is licensed under either of:
+
+- [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0)
+- [MIT License](https://opensource.org/license/mit/)
+
+at your option.
+
+## Acknowledgements
+
+rdesktop builds on the Rust ecosystem, including `wry`, `tao`, `tokio`, `axum`, `chromiumoxide`, `serde`, and `windows`. Their maintainers and contributors make this project possible.
