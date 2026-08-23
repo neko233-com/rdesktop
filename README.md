@@ -12,6 +12,23 @@
 
 rdesktop is designed for desktop applications whose UI is built with web technologies but whose development, testing, and native runtime need to remain observable and scriptable. It provides a common Rust API for windowing, rendering, IPC, input, hotkeys, and development-time visual verification.
 
+## Terminal233 integration
+
+Terminal233 uses this repository as its rdesktop framework source. The client pins the exact git
+revision `01359a93b4337698ee4f43093f0c7bc78bb1b99a` for `rdesktop-core` and `rdesktop-webview`.
+The local working tree used for framework development is
+`C:\Users\14170\Desktop\Code\neko233-Projects\rdesktop`; do not edit Cargo's checkout cache.
+
+Terminal233 has two intentionally interchangeable launch paths:
+
+- the Windows desktop path uses rdesktop WebView/IPC and native pure-Rust `puressh`;
+- the browser IDE path uses the same Terminal233 IDE components and the localhost Node `ssh2js`
+  adapter, so layout, connection flow, terminal events, and SFTP contracts stay aligned.
+
+The current local desktop validation target is Windows `x86_64` only. Windows ARM64 is a future
+tag-only CI target and must not be produced locally until the user explicitly says “发布”. 32-bit
+Windows targets are permanently out of scope.
+
 ## Project status
 
 rdesktop is an active `0.1.x` project. The browser-based development server, Agent API, renderer abstractions, and visual debugging workflow are the primary focus of the current release line. Native build and installer integrations are still evolving and should be evaluated for the target platform before being used in a production distribution pipeline.
