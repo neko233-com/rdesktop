@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rdesktop_core::config::{AppConfig, WindowConfig};
-use rdesktop_core::ipc::{IpcHandler, IpcMessage};
+use rdesktop_core::ipc::{IpcHandler, IpcMessage, IpcResponseSender};
 use rdesktop_core::renderer::{Renderer, RendererKind, ResizeEdge};
 use rdesktop_core::window::WindowHandle;
 use rdesktop_core::{RdesktopError, Result};
@@ -128,7 +128,7 @@ enum PendingOp {
 }
 
 /// Shared IPC response queue.
-type IpcResponseQueue = Arc<Mutex<Vec<String>>>;
+type IpcResponseQueue = Arc<Mutex<Vec<(u64, String)>>>;
 
 /// Window control commands from the IPC thread, drained by the event loop.
 type WindowCommandQueue = Arc<Mutex<Vec<WindowCommand>>>;
@@ -266,7 +266,7 @@ impl WebViewRenderer {
                             delete window.__RDESKTOP_RESOLVE__[id];
                             reject(new Error('IPC timeout'));
                         }
-                    }, 30000);
+                    }, 120000);
                 });
             };
 
@@ -738,12 +738,33 @@ impl Renderer for WebViewRenderer {
                                                     q.push(cmd);
                                                 }
                                             } else {
-                                                let response = handler.handle(msg);
-                                                if let Ok(json) = serde_json::to_string(&response) {
-                                                    if let Ok(mut q) = queue.lock() {
-                                                        q.push(json);
-                                                    }
-                                                }
+                                                // Never run application RPC on the tao/WebView
+                                                // event-loop thread. A Git/network RPC may wait on
+                                                // credentials or a remote timeout; blocking here
+                                                // makes Windows label the entire app "Not responding".
+                                                let request_handler = handler.clone();
+                                                let response_queue = queue.clone();
+                                                let response_wake = wake_proxy.clone();
+                                                let response_sink: IpcResponseSender =
+                                                    Arc::new(move |response| {
+                                                        if let Ok(json) =
+                                                            serde_json::to_string(&response)
+                                                        {
+                                                            if let Ok(mut q) = response_queue.lock()
+                                                            {
+                                                                q.push((rd_id, json));
+                                                            }
+                                                        }
+                                                        let _ = response_wake.send_event(());
+                                                    });
+                                                let thread_name =
+                                                    format!("rdesktop-ipc-{rd_id}-{}", msg.id);
+                                                let _ = std::thread::Builder::new()
+                                                    .name(thread_name)
+                                                    .spawn(move || {
+                                                        request_handler
+                                                            .handle_async(msg, response_sink)
+                                                    });
                                             }
                                             let _ = wake_proxy.send_event(());
                                         }
@@ -823,15 +844,17 @@ impl Renderer for WebViewRenderer {
 
                 Event::MainEventsCleared => {
                     // Drain IPC response queue
-                    let responses: Vec<String> = {
+                    let responses: Vec<(u64, String)> = {
                         let mut queue = ipc_response_queue.lock().unwrap();
                         queue.drain(..).collect()
                     };
-                    for json in responses {
-                        if let Some(entry) = windows.values().next() {
-                            if let Ok(js) = serde_json::to_string(&json) {
-                                let script = format!("window.__RDESKTOP_IPC__({js})");
-                                let _ = entry.webview.evaluate_script(&script);
+                    for (rdesktop_id, json) in responses {
+                        if let Some(tao_id) = rdesktop_to_tao.get(&rdesktop_id) {
+                            if let Some(entry) = windows.get(tao_id) {
+                                if let Ok(js) = serde_json::to_string(&json) {
+                                    let script = format!("window.__RDESKTOP_IPC__({js})");
+                                    let _ = entry.webview.evaluate_script(&script);
+                                }
                             }
                         }
                     }

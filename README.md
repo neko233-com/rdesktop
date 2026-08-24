@@ -83,6 +83,17 @@ The development server supports:
 - native screenshot publication with optional wait-for-paint semantics;
 - a local HTTP API that works with Playwright, Puppeteer, MCP tools, or ordinary scripts.
 
+### Synchronous and asynchronous IPC
+
+`IpcHandler::handle` remains available for small, synchronous RPC methods.
+Native WebView and Chromium renderers dispatch frontend RPC on worker threads
+and deliver responses back on the renderer event loop, so a synchronous Git or
+network call cannot freeze the desktop window. Handlers that already own an
+async runtime can override `IpcHandler::handle_async` and invoke the supplied
+`IpcResponseSender` when their work completes. Responses are correlated by
+request ID and may arrive out of order; window operations remain event-loop
+owned and are never executed from a worker thread.
+
 ### Visual verification and recording
 
 The Agent API owns one recording session and one fixed output file per development server:
@@ -111,7 +122,7 @@ The core workspace includes abstractions and platform implementations for:
 ### Install the CLI
 
 ```bash
-cargo install rdesktop-cli --version 0.1.5
+cargo install rdesktop-cli --version 0.1.6
 ```
 
 ### Create a project
