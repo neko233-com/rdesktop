@@ -25,6 +25,13 @@ browser and rendered by the native desktop path.
 - 32-bit Windows targets are not supported.
 - Do not add `.github/workflows`, tags, or release assets during normal development. The shared
   Terminal233 policy allows release automation only after an explicit publish instruction.
+- Icon assets are generated through the checked-in `rdesktop-assets` crate and the CLI command
+  `rdesktop icons --input <png> --output-dir <dir> --name <stem>`. The command must emit a real
+  multi-entry Windows `.ico` plus the documented PNG sizes, preserve alpha, fit non-square input
+  without cropping, reject oversized input, and keep its output deterministic enough to review.
+- When an application creates Windows shortcuts, it must ship the generated `.ico` beside the
+  executable and set a non-empty shortcut `IconLocation`; a native window PNG alone is not a
+  valid shortcut-icon or Windows Search verification.
 
 ## Verification
 

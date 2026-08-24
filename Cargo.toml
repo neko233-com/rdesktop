@@ -7,6 +7,7 @@ members = [
     "crates/rdesktop-dev",
     "crates/rdesktop-bundler",
     "crates/rdesktop-cli",
+    "crates/rdesktop-assets",
     "examples/hello_world",
     "examples/wallpaper",
     "examples/global_hotkey",

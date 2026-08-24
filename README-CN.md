@@ -125,7 +125,24 @@ rdesktop dev [--path <dir>]         启动浏览器开发服务器
 rdesktop build [--chrome]           构建原生应用路径
 rdesktop bundle --target <target>   生成平台 bundle
 rdesktop info                       查看 rdesktop.toml
+rdesktop icons --input <png>        从一张 PNG 生成多尺寸 ICO/PNG 图标
 ```
+
+### 从 PNG 生成 Windows 图标
+
+开发者只需要准备一张带透明背景的 PNG，即可生成 Windows 快捷方式需要的真实 `.ico`，以及
+16/24/32/48/64/128/256 像素的 PNG 变体：
+
+```bash
+rdesktop icons \
+  --input resources/icons/source.png \
+  --output-dir resources/icons \
+  --name app
+```
+
+输出目录会包含 `app.ico` 和 `app-16.png` 等文件。非正方形源图会被完整缩放到透明正方形画布，
+不会被静默裁剪；输入边长超过 8192 像素会被拒绝。GitX 的 Windows 打包流程使用同样的
+`.ico` 作为开始菜单和桌面快捷方式图标，并会在打包阶段 fail-closed 校验它存在。
 
 构建和安装包命令仍在持续开发中。正式分发前，请检查命令输出，并在目标平台验证生成的产物。
 
@@ -220,6 +237,7 @@ rdesktop/
 │   ├── rdesktop-cef/        Chromium/CDP 后端
 │   ├── rdesktop-dev/        浏览器开发服务器和 Agent API
 │   ├── rdesktop-bundler/    平台 bundle 抽象与生成器
+│   ├── rdesktop-assets/     PNG 到 ICO/桌面图标资源生成器
 │   └── rdesktop-cli/        `rdesktop` 命令行工具
 ├── examples/                示例应用
 ├── test-app/                本地视觉与交互测试夹具

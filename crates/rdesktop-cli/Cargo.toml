@@ -1,7 +1,7 @@
 [package]
 name = "rdesktop-cli"
 description = "CLI tool for rdesktop framework"
-version.workspace = true
+version = "0.1.7"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -15,6 +15,7 @@ path = "src/main.rs"
 rdesktop-core = { workspace = true }
 rdesktop-dev = { workspace = true }
 rdesktop-bundler = { workspace = true }
+rdesktop-assets = { version = "0.1.7", path = "../rdesktop-assets" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

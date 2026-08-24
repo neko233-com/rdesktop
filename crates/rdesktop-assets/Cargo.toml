@@ -1,0 +1,14 @@
+[package]
+name = "rdesktop-assets"
+description = "Asset generation helpers for rdesktop applications"
+version = "0.1.7"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+image = { version = "0.25.6", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tempfile = "3"
