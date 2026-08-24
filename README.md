@@ -154,7 +154,25 @@ rdesktop dev [--path <dir>]         Run the browser development server
 rdesktop build [--chrome]           Build the native application path
 rdesktop bundle --target <target>   Generate a platform bundle
 rdesktop info                       Inspect rdesktop.toml
+rdesktop icons --input <png>        Generate multi-size ICO/PNG icon assets
 ```
+
+### Generate Windows icons from PNG
+
+Prepare one transparent PNG and generate the real `.ico` required by Windows
+shortcuts plus 16/24/32/48/64/128/256 pixel PNG variants:
+
+```bash
+rdesktop icons \
+  --input resources/icons/source.png \
+  --output-dir resources/icons \
+  --name app
+```
+
+The output contains `app.ico` and files such as `app-16.png`. Non-square input
+is fitted into a transparent square without silent cropping; source edges over
+8192 pixels are rejected. GitX uses the same `.ico` for its Start Menu and
+Desktop shortcuts and fail-closed validates it during packaging.
 
 The build and installer commands are under active development. Inspect their output and validate the generated artifact for your platform before distribution.
 
@@ -249,6 +267,7 @@ rdesktop/
 │   ├── rdesktop-cef/        Chromium/CDP backend
 │   ├── rdesktop-dev/        Browser dev server and Agent API
 │   ├── rdesktop-bundler/    Platform bundle abstractions and generators
+│   ├── rdesktop-assets/     PNG to ICO/desktop icon asset generator
 │   └── rdesktop-cli/        `rdesktop` command-line interface
 ├── examples/                Small example applications
 ├── test-app/                Local visual and interaction test fixture

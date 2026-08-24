@@ -5,11 +5,13 @@
 //!   rdesktop dev             - Start dev server (browser mode)
 //!   rdesktop build           - Build native binary
 //!   rdesktop bundle          - Package into installer
+//!   rdesktop icons           - Generate multi-size ICO/PNG assets
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use rdesktop_assets::generate_icons;
 use rdesktop_bundler::common::Bundler;
 use rdesktop_bundler::config::BundleTarget;
 use rdesktop_bundler::linux::LinuxBundler;
@@ -84,6 +86,22 @@ enum Commands {
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
     },
+
+    /// Generate Windows ICO and desktop PNG assets from one PNG source
+    #[command(name = "icons", visible_alias = "icon")]
+    Icons {
+        /// Source PNG (transparent background is recommended)
+        #[arg(short, long, value_name = "PNG")]
+        input: PathBuf,
+
+        /// Directory for generated assets
+        #[arg(short, long, default_value = "resources/icons", value_name = "DIR")]
+        output_dir: PathBuf,
+
+        /// Output file stem, for example `app` -> `app.ico`
+        #[arg(short, long, default_value = "app")]
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -102,6 +120,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::Build { path, chrome } => cmd_build(&path, chrome),
         Commands::Bundle { path, target, all } => cmd_bundle(&path, target, all),
         Commands::Info { path } => cmd_info(&path),
+        Commands::Icons {
+            input,
+            output_dir,
+            name,
+        } => cmd_icons(&input, &output_dir, &name),
     }
 }
 
@@ -438,6 +461,15 @@ fn cmd_info(path: &PathBuf) -> anyhow::Result<()> {
         config["renderer"]["kind"].as_str().unwrap_or("webview")
     );
 
+    Ok(())
+}
+
+fn cmd_icons(input: &PathBuf, output_dir: &PathBuf, name: &str) -> anyhow::Result<()> {
+    let generated = generate_icons(input, output_dir, name).map_err(anyhow::Error::msg)?;
+    println!("Generated {}", generated.ico.display());
+    for (size, path) in generated.pngs {
+        println!("Generated {size:>4}px {}", path.display());
+    }
     Ok(())
 }
 
