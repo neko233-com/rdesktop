@@ -12,6 +12,10 @@ browser and rendered by the native desktop path.
   behavior the source of truth for the native renderer.
 - Native application IPC must remain structured, bounded, and testable through the Agent API.
 - Keep screenshot/recording output bounded and idempotent; never persist credentials or test data.
+- Keep the window decoration bridge observable and tested. `setDecorations(true)` means the OS
+  title bar/borders are visible; `setDecorations(false)` enables a custom integrated title bar.
+  Applications may switch this live, but must provide accessible custom controls for frameless
+  windows and keep the system-decorated path usable.
 
 ## Platform and release rules
 

@@ -114,6 +114,8 @@ The core workspace includes abstractions and platform implementations for:
 - normal, overlay, wallpaper, always-on-top, transparent, and click-through windows;
 - custom title-bar dragging and resizing;
 - native window icons;
+- runtime switching between frameless integrated UI and OS-decorated system window UI via
+  `window.__RDESKTOP_WINDOW__.setDecorations(true|false)`;
 - global hotkeys and opt-in global input hooks;
 - structured IPC between Rust and the frontend.
 

@@ -146,6 +146,7 @@ enum WindowAction {
     StartDrag,
     StartResize(tao::window::ResizeDirection),
     SetFullscreen(bool),
+    SetDecorations(bool),
 }
 
 /// Convert rdesktop ResizeEdge to tao's ResizeDirection.
@@ -317,6 +318,9 @@ impl WebViewRenderer {
                 setFullscreen: function(fs) {
                     postWindowCommand('set_fullscreen', { value: !!fs });
                 },
+                setDecorations: function(decorations) {
+                    postWindowCommand('set_decorations', { value: !!decorations });
+                },
                 isMaximized: false,
                 isFullscreen: false
             };
@@ -358,6 +362,10 @@ impl WebViewRenderer {
                 "set_fullscreen" => {
                     let val = payload["value"].as_bool().unwrap_or(false);
                     WindowAction::SetFullscreen(val)
+                }
+                "set_decorations" => {
+                    let val = payload["value"].as_bool().unwrap_or(true);
+                    WindowAction::SetDecorations(val)
                 }
                 _ => return None,
             };
@@ -407,6 +415,23 @@ mod tests {
         });
 
         assert!(WebViewRenderer::parse_legacy_window_command(&raw, 1).is_some());
+    }
+
+    #[test]
+    fn parses_runtime_system_window_decoration_toggle() {
+        let raw = serde_json::json!({
+            "__window__": true,
+            "action": "set_decorations",
+            "value": true
+        });
+
+        assert!(matches!(
+            WebViewRenderer::parse_legacy_window_command(&raw, 1),
+            Some(WindowCommand {
+                action: WindowAction::SetDecorations(true),
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -906,6 +931,9 @@ impl Renderer for WebViewRenderer {
                                         } else {
                                             entry.window.set_fullscreen(None);
                                         }
+                                    }
+                                    WindowAction::SetDecorations(decorations) => {
+                                        entry.window.set_decorations(decorations);
                                     }
                                 }
                             }
