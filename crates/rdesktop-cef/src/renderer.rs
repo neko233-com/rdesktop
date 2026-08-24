@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rdesktop_core::config::{AppConfig, WindowConfig};
-use rdesktop_core::ipc::{IpcHandler, IpcMessage};
+use rdesktop_core::ipc::{IpcHandler, IpcMessage, IpcResponseSender};
 use rdesktop_core::renderer::{Renderer, RendererKind, ResizeEdge};
 use rdesktop_core::window::WindowHandle;
 use rdesktop_core::Result;
@@ -120,6 +120,8 @@ pub struct CefRenderer {
     outbox: Arc<Mutex<Vec<String>>>,
 }
 
+type IpcResponseQueue = Arc<Mutex<Vec<(u64, String)>>>;
+
 impl CefRenderer {
     pub fn new(config: &AppConfig) -> Result<Self> {
         Ok(Self {
@@ -197,7 +199,7 @@ impl CefRenderer {
                             delete window.__RDESKTOP_RESOLVE__[id];
                             reject(new Error('IPC timeout'));
                         }
-                    }, 30000);
+                    }, 120000);
                 });
             };
             window.__rdesktop_take__ = function() {
@@ -467,6 +469,8 @@ impl Renderer for CefRenderer {
         rt.spawn(async move { while let Some(_) = handler.next().await {} });
 
         let screenshot_sink = self.screenshot_sink.clone();
+        let ipc_handler = self.ipc_handler.clone();
+        let ipc_response_queue: IpcResponseQueue = Arc::new(Mutex::new(Vec::new()));
 
         // Create Chrome pages
         let mut pages: Vec<(u64, ChromePage)> = Vec::new();
@@ -764,9 +768,12 @@ impl Renderer for CefRenderer {
                         }
                     }
 
-                    // Frontend → backend IPC: drain queued invokes and dispatch to the handler
-                    if let Some(handler) = self.ipc_handler.as_ref() {
-                        for (_, p) in pages.iter() {
+                    // Frontend → backend IPC: drain queued invokes and dispatch
+                    // on worker threads. A synchronous handler is still
+                    // supported through IpcHandler::handle, but it can no
+                    // longer freeze the tao/CEF event loop.
+                    if let Some(handler) = ipc_handler.as_ref() {
+                        for (rd_id, p) in pages.iter() {
                             if let Ok(value) =
                                 rt.block_on(p.page.evaluate("window.__rdesktop_take__()"))
                             {
@@ -775,17 +782,43 @@ impl Renderer for CefRenderer {
                                         serde_json::from_str::<Vec<IpcMessage>>(raw)
                                     {
                                         for msg in messages {
-                                            let response = handler.handle(msg);
-                                            if let Ok(json) = serde_json::to_string(&response) {
-                                                let script =
-                                                    format!("window.__RDESKTOP_IPC__({})", json);
-                                                let _ =
-                                                    rt.block_on(p.page.evaluate(script.as_str()));
-                                            }
+                                            let request_handler = handler.clone();
+                                            let response_queue = ipc_response_queue.clone();
+                                            let response_rd_id = *rd_id;
+                                            let response_sink: IpcResponseSender =
+                                                Arc::new(move |response| {
+                                                    if let Ok(json) =
+                                                        serde_json::to_string(&response)
+                                                    {
+                                                        if let Ok(mut q) = response_queue.lock() {
+                                                            q.push((response_rd_id, json));
+                                                        }
+                                                    }
+                                                });
+                                            let thread_name =
+                                                format!("rdesktop-ipc-{rd_id}-{}", msg.id);
+                                            let _ = std::thread::Builder::new()
+                                                .name(thread_name)
+                                                .spawn(move || {
+                                                    request_handler.handle_async(msg, response_sink)
+                                                });
                                         }
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Responses are evaluated on the CEF event-loop thread so
+                    // worker threads never touch a Page directly.
+                    let responses: Vec<(u64, String)> = {
+                        let mut queue = ipc_response_queue.lock().unwrap();
+                        queue.drain(..).collect()
+                    };
+                    for (rd_id, json) in responses {
+                        if let Some((_, p)) = pages.iter().find(|(id, _)| *id == rd_id) {
+                            let script = format!("window.__RDESKTOP_IPC__({})", json);
+                            let _ = rt.block_on(p.page.evaluate(script.as_str()));
                         }
                     }
 

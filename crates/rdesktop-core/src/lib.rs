@@ -50,7 +50,7 @@ pub use event::Event;
 pub use global::{Outbox, PushHandler};
 pub use hotkeys::{Hotkey, HotkeyHandler, HotkeyManager, Key, Modifiers};
 pub use input::{GlobalInput, GlobalInputEvent, GlobalInputHandler, KeyState, MouseButton};
-pub use ipc::{IpcHandler, IpcMessage, IpcResponse};
+pub use ipc::{IpcHandler, IpcMessage, IpcResponse, IpcResponseSender};
 pub use renderer::{Renderer, RendererKind, ResizeEdge};
 pub use simulate::InputSimulator;
 pub use window::WindowHandle;
