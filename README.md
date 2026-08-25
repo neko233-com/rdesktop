@@ -124,7 +124,7 @@ The core workspace includes abstractions and platform implementations for:
 ### Install the CLI
 
 ```bash
-cargo install rdesktop-cli --version 0.1.7
+cargo install rdesktop-cli --version 0.1.8
 ```
 
 ### Create a project
@@ -175,6 +175,25 @@ The output contains `app.ico` and files such as `app-16.png`. Non-square input
 is fitted into a transparent square without silent cropping; source edges over
 8192 pixels are rejected. GitX uses the same `.ico` for its Start Menu and
 Desktop shortcuts and fail-closed validates it during packaging.
+
+### Preserve WebView data across updates
+
+Portable applications should keep WebView2 state outside the replaceable
+program directory. Configure an absolute per-user path before starting the
+renderer so cookies, localStorage, IndexedDB, tabs, and preferences survive a
+clean application update:
+
+```rust
+let mut renderer = WebViewRenderer::new(&config)?;
+renderer.set_data_directory(
+    std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+        .join("hello-rdesktop")
+        .join("WebView2"),
+)?;
+```
+
+The updater must preserve this directory. Relative paths and paths that are
+already regular files are rejected.
 
 The build and installer commands are under active development. Inspect their output and validate the generated artifact for your platform before distribution.
 

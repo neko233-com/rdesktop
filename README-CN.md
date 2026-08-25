@@ -93,7 +93,7 @@ Chromium 路径要求主机上存在兼容的 Chrome、Chromium 或 Edge 可执�
 ### 安装 CLI
 
 ```bash
-cargo install rdesktop-cli --version 0.1.7
+cargo install rdesktop-cli --version 0.1.8
 ```
 
 ### 创建项目
@@ -143,6 +143,22 @@ rdesktop icons \
 输出目录会包含 `app.ico` 和 `app-16.png` 等文件。非正方形源图会被完整缩放到透明正方形画布，
 不会被静默裁剪；输入边长超过 8192 像素会被拒绝。GitX 的 Windows 打包流程使用同样的
 `.ico` 作为开始菜单和桌面快捷方式图标，并会在打包阶段 fail-closed 校验它存在。
+
+### 升级时保留 WebView 数据
+
+便携应用应把 WebView2 数据放在可替换程序目录之外。启动 renderer 前设置绝对的用户级目录，
+即可让 cookie、localStorage、IndexedDB、标签页和偏好在 clean install 后继续保留：
+
+```rust
+let mut renderer = WebViewRenderer::new(&config)?;
+renderer.set_data_directory(
+    std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+        .join("hello-rdesktop")
+        .join("WebView2"),
+)?;
+```
+
+更新器不得删除该目录。相对路径和已存在的普通文件路径会被拒绝。
 
 构建和安装包命令仍在持续开发中。正式分发前，请检查命令输出，并在目标平台验证生成的产物。
 

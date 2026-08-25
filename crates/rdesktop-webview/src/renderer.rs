@@ -17,7 +17,7 @@ use tao::window::{Window, WindowBuilder, WindowId};
 use wry::http::{Request, Response};
 #[cfg(target_os = "windows")]
 use wry::WebViewBuilderExtWindows;
-use wry::{WebView, WebViewBuilder};
+use wry::{WebContext, WebView, WebViewBuilder};
 
 struct WindowEntry {
     window: Window,
@@ -189,6 +189,7 @@ pub struct WebViewRenderer {
     pending_ops: RefCell<Vec<PendingOp>>,
     next_window_id: RefCell<u64>,
     asset_root: Option<PathBuf>,
+    data_directory: Option<PathBuf>,
     /// External outbox for native → frontend pushes (e.g. a Node extension
     /// host asking the UI to show a message or apply an editor edit). Drained
     /// every frame by the event loop, same as `ipc_response_queue`.
@@ -204,6 +205,7 @@ impl WebViewRenderer {
             pending_ops: RefCell::new(Vec::new()),
             next_window_id: RefCell::new(1),
             asset_root: None,
+            data_directory: None,
             outbox: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -229,6 +231,31 @@ impl WebViewRenderer {
             )));
         }
         self.asset_root = Some(root);
+        Ok(())
+    }
+
+    /// Store WebView cookies, localStorage, IndexedDB, and cache outside the
+    /// executable directory.
+    ///
+    /// Windows portable applications should point this at a preserved per-user
+    /// directory (for example `%LOCALAPPDATA%/<product>/WebView2`). Otherwise
+    /// WebView2 defaults beside the executable can be lost during a clean
+    /// application update. The path must be absolute; Wry/WebView2 creates it
+    /// when the first WebView starts.
+    pub fn set_data_directory(&mut self, directory: impl Into<PathBuf>) -> Result<()> {
+        let directory = directory.into();
+        if !directory.is_absolute() {
+            return Err(RdesktopError::Config(
+                "webview data directory must be absolute".to_string(),
+            ));
+        }
+        if directory.exists() && !directory.is_dir() {
+            return Err(RdesktopError::Config(format!(
+                "webview data directory is not a directory: {}",
+                directory.display()
+            )));
+        }
+        self.data_directory = Some(directory);
         Ok(())
     }
 
@@ -474,6 +501,29 @@ mod tests {
             tao::dpi::Position::Physical(position) if position.x == 0 && position.y == 0
         ));
     }
+
+    #[test]
+    fn persistent_webview_data_directory_requires_an_absolute_path() {
+        let mut renderer = WebViewRenderer::new(&AppConfig::default()).unwrap();
+
+        assert!(renderer
+            .set_data_directory("relative/webview-data")
+            .is_err());
+        assert!(renderer.data_directory.is_none());
+    }
+
+    #[test]
+    fn persistent_webview_data_directory_accepts_a_missing_per_user_directory() {
+        let requested = std::env::temp_dir().join("rdesktop-webview-persistent-profile");
+        let mut renderer = WebViewRenderer::new(&AppConfig::default()).unwrap();
+
+        renderer.set_data_directory(&requested).unwrap();
+
+        assert_eq!(
+            renderer.data_directory.as_deref(),
+            Some(requested.as_path())
+        );
+    }
 }
 
 impl Renderer for WebViewRenderer {
@@ -625,6 +675,7 @@ impl Renderer for WebViewRenderer {
         let ipc_handler = self.ipc_handler.take();
         let webgpu_enabled = self._config.renderer.webgpu;
         let asset_root = self.asset_root.clone();
+        let data_directory = self.data_directory.clone();
         let pending_windows: Vec<(u64, WindowConfig)> =
             self.pending_windows.borrow_mut().drain(..).collect();
         let pending_ops: Vec<PendingOp> = self.pending_ops.borrow_mut().drain(..).collect();
@@ -683,6 +734,10 @@ impl Renderer for WebViewRenderer {
         let mut windows: HashMap<WindowId, WindowEntry> = HashMap::new();
         let mut rdesktop_to_tao: HashMap<u64, WindowId> = HashMap::new();
         let mut tao_to_rdesktop: HashMap<WindowId, u64> = HashMap::new();
+        // Keep the context alive for the entire event loop. On Windows this
+        // binds WebView2 storage to the caller-selected per-user directory,
+        // instead of the replaceable executable directory.
+        let mut web_context = data_directory.map(|path| WebContext::new(Some(path)));
 
         event_loop.run(move |event, event_loop_target, control_flow| {
             *control_flow = ControlFlow::Wait;
@@ -717,10 +772,14 @@ impl Renderer for WebViewRenderer {
                         // Realize wallpaper/overlay/click-through window attributes.
                         rdesktop_core::apply_window_attributes(&window, window_config);
 
-                        let mut builder = WebViewBuilder::new()
-                            .with_url("about:blank")
-                            .with_devtools(cfg!(debug_assertions))
-                            .with_initialization_script(Self::bridge_script());
+                        let mut builder = if let Some(context) = web_context.as_mut() {
+                            WebViewBuilder::new_with_web_context(context)
+                        } else {
+                            WebViewBuilder::new()
+                        }
+                        .with_url("about:blank")
+                        .with_devtools(cfg!(debug_assertions))
+                        .with_initialization_script(Self::bridge_script());
 
                         if let Some(root) = asset_root.clone() {
                             builder = builder.with_custom_protocol(
