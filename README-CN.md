@@ -93,7 +93,7 @@ Chromium 路径要求主机上存在兼容的 Chrome、Chromium 或 Edge 可执�
 ### 安装 CLI
 
 ```bash
-cargo install rdesktop-cli --version 0.1.5
+cargo install rdesktop-cli --version 0.1.7
 ```
 
 ### 创建项目

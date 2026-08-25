@@ -124,7 +124,7 @@ The core workspace includes abstractions and platform implementations for:
 ### Install the CLI
 
 ```bash
-cargo install rdesktop-cli --version 0.1.6
+cargo install rdesktop-cli --version 0.1.7
 ```
 
 ### Create a project

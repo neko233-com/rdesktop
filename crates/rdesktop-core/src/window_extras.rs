@@ -29,37 +29,50 @@ pub fn window_icon(config: &WindowConfig) -> Option<Icon> {
 pub fn apply_window_attributes(window: &Window, config: &WindowConfig) {
     let click_through = config.click_through || config.kind == WindowKind::Wallpaper;
     let is_wallpaper = config.kind == WindowKind::Wallpaper;
+    let fit_to_work_area = config.kind == WindowKind::Normal;
 
     #[cfg(target_os = "windows")]
-    windows::apply(window, click_through, is_wallpaper);
+    windows::apply(window, click_through, is_wallpaper, fit_to_work_area);
     #[cfg(target_os = "macos")]
     macos::apply(window, click_through, is_wallpaper);
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let _ = (window, click_through, is_wallpaper);
+        let _ = (window, click_through, is_wallpaper, fit_to_work_area);
         tracing::debug!("click-through / wallpaper layer not implemented on this platform");
     }
 }
 
 #[cfg(target_os = "windows")]
 mod windows {
-    use std::ptr;
+    use std::{mem::size_of, ptr};
 
     use tao::platform::windows::WindowExtWindows;
     use tao::window::Window;
-    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, FindWindowExW, FindWindowW, GetWindowLongPtrW, SendMessageTimeoutW, SetParent,
-        SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_BOTTOM, SMTO_ABORTIFHUNG,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+        EnumWindows, FindWindowExW, FindWindowW, GetWindowLongPtrW, GetWindowRect,
+        SendMessageTimeoutW, SetParent, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_BOTTOM,
+        SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+        WS_EX_LAYERED, WS_EX_TRANSPARENT,
     };
 
-    pub(crate) fn apply(window: &Window, click_through: bool, is_wallpaper: bool) {
+    pub(crate) fn apply(
+        window: &Window,
+        click_through: bool,
+        is_wallpaper: bool,
+        fit_to_work_area: bool,
+    ) {
         let hwnd = window.hwnd() as HWND;
         if hwnd == 0 {
             return;
         }
         unsafe {
+            if fit_to_work_area {
+                center_and_fit_to_work_area(hwnd);
+            }
             if click_through {
                 let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
                 let new_ex = ex | (WS_EX_LAYERED as isize) | (WS_EX_TRANSPARENT as isize);
@@ -80,6 +93,65 @@ mod windows {
                 );
             }
         }
+    }
+
+    fn fitted_window_rect(window: RECT, work: RECT) -> RECT {
+        let work_width = (work.right - work.left).max(1);
+        let work_height = (work.bottom - work.top).max(1);
+        let width = (window.right - window.left).clamp(1, work_width);
+        let height = (window.bottom - window.top).clamp(1, work_height);
+        let left = work.left + (work_width - width) / 2;
+        let top = work.top + (work_height - height) / 2;
+        RECT {
+            left,
+            top,
+            right: left + width,
+            bottom: top + height,
+        }
+    }
+
+    unsafe fn center_and_fit_to_work_area(hwnd: HWND) {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if monitor == 0 {
+            return;
+        }
+        let mut monitor_info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            rcWork: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            dwFlags: 0,
+        };
+        let mut window_rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetMonitorInfoW(monitor, &mut monitor_info) == 0
+            || GetWindowRect(hwnd, &mut window_rect) == 0
+        {
+            return;
+        }
+        let fitted = fitted_window_rect(window_rect, monitor_info.rcWork);
+        SetWindowPos(
+            hwnd,
+            0,
+            fitted.left,
+            fitted.top,
+            fitted.right - fitted.left,
+            fitted.bottom - fitted.top,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+        );
     }
 
     /// Locate the desktop `WorkerW` window (the host behind the desktop icons)
@@ -122,6 +194,57 @@ mod windows {
                 *pworker = FindWindowExW(0, hwnd, windows_sys::w!("WorkerW"), ptr::null::<u16>());
             }
             windows_sys::Win32::Foundation::TRUE
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn centers_window_and_clamps_oversized_height_to_work_area() {
+            let fitted = fitted_window_rect(
+                RECT {
+                    left: 120,
+                    top: 120,
+                    right: 2280,
+                    bottom: 1560,
+                },
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 2560,
+                    bottom: 1400,
+                },
+            );
+
+            assert_eq!(
+                (fitted.left, fitted.top, fitted.right, fitted.bottom),
+                (200, 0, 2360, 1400)
+            );
+        }
+
+        #[test]
+        fn centers_smaller_window_without_resizing_it() {
+            let fitted = fitted_window_rect(
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1455,
+                    bottom: 957,
+                },
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 2560,
+                    bottom: 1400,
+                },
+            );
+
+            assert_eq!(
+                (fitted.left, fitted.top, fitted.right, fitted.bottom),
+                (552, 221, 2007, 1178)
+            );
         }
     }
 }

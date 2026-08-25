@@ -389,6 +389,13 @@ impl WebViewRenderer {
     }
 }
 
+fn physical_webview_bounds(width: u32, height: u32) -> wry::Rect {
+    wry::Rect {
+        position: tao::dpi::PhysicalPosition::<i32>::new(0, 0).into(),
+        size: tao::dpi::PhysicalSize::new(width, height).into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,6 +459,20 @@ mod tests {
             native_asset_url("rdesktop://localhost/index.html", false),
             "rdesktop://localhost/index.html"
         );
+    }
+
+    #[test]
+    fn resize_bounds_preserve_physical_pixels_at_high_dpi() {
+        let bounds = physical_webview_bounds(2560, 1369);
+
+        assert!(matches!(
+            bounds.size,
+            tao::dpi::Size::Physical(size) if size.width == 2560 && size.height == 1369
+        ));
+        assert!(matches!(
+            bounds.position,
+            tao::dpi::Position::Physical(position) if position.x == 0 && position.y == 0
+        ));
     }
 }
 
@@ -843,10 +864,13 @@ impl Renderer for WebViewRenderer {
                     ..
                 } => {
                     if let Some(entry) = windows.get(&window_id) {
-                        let _ = entry.webview.set_bounds(wry::Rect {
-                            position: tao::dpi::LogicalPosition::<i32>::new(0, 0).into(),
-                            size: tao::dpi::LogicalSize::new(size.width, size.height).into(),
-                        });
+                        // tao reports Resized in physical pixels. Re-wrapping those
+                        // values as LogicalSize multiplies the WebView bounds by the
+                        // monitor scale factor (for example 1.5x at 150% DPI), which
+                        // clips bottom-docked UI outside the native client area.
+                        let _ = entry
+                            .webview
+                            .set_bounds(physical_webview_bounds(size.width, size.height));
                     }
                 }
 
@@ -856,14 +880,10 @@ impl Renderer for WebViewRenderer {
                     ..
                 } => {
                     if let Some(entry) = windows.get(&window_id) {
-                        let _ = entry.webview.set_bounds(wry::Rect {
-                            position: tao::dpi::LogicalPosition::<i32>::new(0, 0).into(),
-                            size: tao::dpi::LogicalSize::new(
-                                new_inner_size.width,
-                                new_inner_size.height,
-                            )
-                            .into(),
-                        });
+                        let _ = entry.webview.set_bounds(physical_webview_bounds(
+                            new_inner_size.width,
+                            new_inner_size.height,
+                        ));
                     }
                 }
 
