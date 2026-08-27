@@ -17,7 +17,7 @@ use tao::window::{Window, WindowBuilder, WindowId};
 use wry::http::{Request, Response};
 #[cfg(target_os = "windows")]
 use wry::WebViewBuilderExtWindows;
-use wry::{WebContext, WebView, WebViewBuilder};
+use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
 
 struct WindowEntry {
     window: Window,
@@ -89,6 +89,46 @@ fn content_type(path: &Path) -> &'static str {
         "woff2" => "font/woff2",
         _ => "application/octet-stream",
     }
+}
+
+fn file_drop_message(event: DragDropEvent) -> Option<String> {
+    let payload = match event {
+        DragDropEvent::Enter { paths, position } => serde_json::json!({
+            "cmd": "rdesktop.fileDrop",
+            "payload": {
+                "phase": "enter",
+                "paths": paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+                "position": { "x": position.0, "y": position.1 },
+            },
+        }),
+        DragDropEvent::Drop { paths, position } => serde_json::json!({
+            "cmd": "rdesktop.fileDrop",
+            "payload": {
+                "phase": "drop",
+                "paths": paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+                "position": { "x": position.0, "y": position.1 },
+            },
+        }),
+        DragDropEvent::Leave => serde_json::json!({
+            "cmd": "rdesktop.fileDrop",
+            "payload": { "phase": "leave", "paths": [] },
+        }),
+        DragDropEvent::Over { .. } => return None,
+        _ => return None,
+    };
+    Some(payload.to_string())
+}
+
+fn enqueue_file_drop(outbox: &Arc<Mutex<Vec<String>>>, event: DragDropEvent) -> bool {
+    let Some(message) = file_drop_message(event) else {
+        return true;
+    };
+    match outbox.lock() {
+        Ok(mut queue) if queue.len() < 256 => queue.push(message),
+        Ok(_) => tracing::warn!("Dropping file-drop event because the frontend outbox is full"),
+        Err(_) => tracing::error!("Could not lock frontend outbox for a file-drop event"),
+    }
+    true
 }
 
 /// Wry's Windows backend exposes custom protocols through an HTTP origin.
@@ -524,6 +564,27 @@ mod tests {
             Some(requested.as_path())
         );
     }
+
+    #[test]
+    fn serializes_native_file_drop_for_the_frontend_bridge() {
+        let raw = file_drop_message(DragDropEvent::Drop {
+            paths: vec![PathBuf::from(r"C:\game\config")],
+            position: (42, 84),
+        })
+        .expect("drop event should be forwarded");
+        let message: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(message["cmd"], "rdesktop.fileDrop");
+        assert_eq!(message["payload"]["phase"], "drop");
+        assert_eq!(message["payload"]["paths"][0], r"C:\game\config");
+        assert_eq!(message["payload"]["position"]["x"], 42);
+        assert_eq!(message["payload"]["position"]["y"], 84);
+    }
+
+    #[test]
+    fn ignores_high_frequency_file_drag_over_messages() {
+        assert!(file_drop_message(DragDropEvent::Over { position: (1, 2) }).is_none());
+    }
 }
 
 impl Renderer for WebViewRenderer {
@@ -780,6 +841,11 @@ impl Renderer for WebViewRenderer {
                         .with_url("about:blank")
                         .with_devtools(cfg!(debug_assertions))
                         .with_initialization_script(Self::bridge_script());
+
+                        let file_drop_outbox = outbox_for_loop.clone();
+                        builder = builder.with_drag_drop_handler(move |event| {
+                            enqueue_file_drop(&file_drop_outbox, event)
+                        });
 
                         if let Some(root) = asset_root.clone() {
                             builder = builder.with_custom_protocol(
