@@ -110,6 +110,20 @@ pub struct RendererConfig {
     /// shaders (Wallpaper-Engine-style effects). Passed as Chromium flags.
     #[serde(default = "default_true")]
     pub webgpu: bool,
+
+    /// Origins allowed to navigate the packaged WebView and invoke native IPC. An empty list
+    /// preserves the framework's legacy unrestricted behavior; production applications should
+    /// set their exact local asset origin (for example `rdesktop://localhost`).
+    #[serde(default)]
+    pub trusted_origins: Vec<String>,
+
+    /// Maximum UTF-8 byte length accepted from one WebView IPC message.
+    #[serde(default = "default_max_ipc_message_bytes")]
+    pub max_ipc_message_bytes: usize,
+
+    /// Maximum number of application IPC handlers that may execute concurrently.
+    #[serde(default = "default_max_ipc_in_flight")]
+    pub max_ipc_in_flight: usize,
 }
 
 impl Default for RendererConfig {
@@ -117,6 +131,9 @@ impl Default for RendererConfig {
         Self {
             kind: RendererKind::default(),
             webgpu: true,
+            trusted_origins: Vec::new(),
+            max_ipc_message_bytes: default_max_ipc_message_bytes(),
+            max_ipc_in_flight: default_max_ipc_in_flight(),
         }
     }
 }
@@ -406,6 +423,12 @@ fn default_height() -> u32 {
 fn default_true() -> bool {
     true
 }
+fn default_max_ipc_message_bytes() -> usize {
+    1024 * 1024
+}
+fn default_max_ipc_in_flight() -> usize {
+    32
+}
 fn default_dev_port() -> u16 {
     1420
 }
@@ -417,4 +440,17 @@ fn default_windows_installer() -> String {
 }
 fn default_linux_packages() -> Vec<String> {
     vec!["appimage".to_string()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renderer_security_limits_default_when_omitted() {
+        let renderer: RendererConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(renderer.trusted_origins.is_empty());
+        assert_eq!(renderer.max_ipc_message_bytes, 1024 * 1024);
+        assert_eq!(renderer.max_ipc_in_flight, 32);
+    }
 }

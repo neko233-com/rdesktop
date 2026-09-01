@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rdesktop_core::config::{AppConfig, WindowConfig};
-use rdesktop_core::ipc::{IpcHandler, IpcMessage, IpcResponseSender};
+use rdesktop_core::ipc::{IpcHandler, IpcMessage, IpcResponse, IpcResponseSender};
 use rdesktop_core::renderer::{Renderer, RendererKind, ResizeEdge};
 use rdesktop_core::window::WindowHandle;
 use rdesktop_core::{RdesktopError, Result};
@@ -17,7 +18,89 @@ use tao::window::{Window, WindowBuilder, WindowId};
 use wry::http::{Request, Response};
 #[cfg(target_os = "windows")]
 use wry::WebViewBuilderExtWindows;
-use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
+use wry::{DragDropEvent, NewWindowResponse, WebContext, WebView, WebViewBuilder};
+
+const MAX_IPC_ID_BYTES: usize = 128;
+const MAX_IPC_COMMAND_BYTES: usize = 128;
+const HARD_MAX_IPC_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const HARD_MAX_IPC_IN_FLIGHT: usize = 256;
+
+struct IpcWorkerPermit {
+    in_flight: Arc<AtomicUsize>,
+}
+
+impl Drop for IpcWorkerPermit {
+    fn drop(&mut self) {
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_acquire_ipc_worker(in_flight: &Arc<AtomicUsize>, limit: usize) -> Option<IpcWorkerPermit> {
+    in_flight
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            (current < limit.max(1)).then_some(current + 1)
+        })
+        .ok()?;
+    Some(IpcWorkerPermit {
+        in_flight: Arc::clone(in_flight),
+    })
+}
+
+fn canonical_origin(url: &str) -> Option<String> {
+    let uri = url.parse::<wry::http::Uri>().ok()?;
+    let scheme = uri.scheme_str()?.to_ascii_lowercase();
+    let authority = uri.authority()?.as_str().to_ascii_lowercase();
+    #[cfg(target_os = "windows")]
+    if scheme == "http" {
+        if let Some(host) = authority.strip_prefix("rdesktop.") {
+            if !host.is_empty() && !host.contains('.') && !host.contains(':') {
+                return Some(format!("rdesktop://{host}"));
+            }
+        }
+    }
+    Some(format!("{scheme}://{authority}"))
+}
+
+fn canonical_trusted_origins(origins: &[String]) -> HashSet<String> {
+    origins
+        .iter()
+        .filter_map(|origin| canonical_origin(origin.trim()))
+        .collect()
+}
+
+fn is_trusted_navigation(
+    url: &str,
+    trusted_origins: &HashSet<String>,
+    restrict_origins: bool,
+) -> bool {
+    url.eq_ignore_ascii_case("about:blank")
+        || !restrict_origins
+        || canonical_origin(url).is_some_and(|origin| trusted_origins.contains(&origin))
+}
+
+fn is_trusted_ipc_request(
+    request_uri: &wry::http::Uri,
+    trusted_origins: &HashSet<String>,
+    restrict_origins: bool,
+) -> bool {
+    !restrict_origins
+        || canonical_origin(&request_uri.to_string())
+            .is_some_and(|origin| trusted_origins.contains(&origin))
+}
+
+fn parse_bounded_ipc_message(body: &str, max_bytes: usize) -> Option<serde_json::Value> {
+    if body.len() > max_bytes.max(1) {
+        return None;
+    }
+    serde_json::from_str(body).ok()
+}
+
+fn ipc_envelope_is_bounded(message: &IpcMessage) -> bool {
+    !message.id.is_empty()
+        && message.id.len() <= MAX_IPC_ID_BYTES
+        && !message.cmd.is_empty()
+        && message.cmd.len() <= MAX_IPC_COMMAND_BYTES
+}
 
 struct WindowEntry {
     window: Window,
@@ -529,6 +612,99 @@ mod tests {
     }
 
     #[test]
+    fn trusted_origin_blocks_lookalike_navigation_and_ipc() {
+        let trusted = canonical_trusted_origins(&["rdesktop://localhost".to_string()]);
+        assert!(is_trusted_navigation("about:blank", &trusted, true));
+        assert!(is_trusted_navigation(
+            "rdesktop://localhost/index.html#session",
+            &trusted,
+            true
+        ));
+        assert!(!is_trusted_navigation(
+            "https://rdesktop.localhost.evil.invalid/",
+            &trusted,
+            true
+        ));
+        assert!(!is_trusted_navigation(
+            "https://example.invalid/",
+            &trusted,
+            true
+        ));
+
+        let native_url = native_asset_url("rdesktop://localhost/index.html", true);
+        let trusted_request = native_url.parse::<wry::http::Uri>().unwrap();
+        let untrusted_request = "https://example.invalid/"
+            .parse::<wry::http::Uri>()
+            .unwrap();
+        assert!(is_trusted_ipc_request(&trusted_request, &trusted, true));
+        assert!(!is_trusted_ipc_request(&untrusted_request, &trusted, true));
+    }
+
+    #[test]
+    fn invalid_configured_origins_fail_closed() {
+        let trusted = canonical_trusted_origins(&["not an origin".to_string()]);
+        assert!(trusted.is_empty());
+        assert!(is_trusted_navigation("about:blank", &trusted, true));
+        assert!(!is_trusted_navigation(
+            "https://example.invalid/",
+            &trusted,
+            true
+        ));
+        let request = "https://example.invalid/"
+            .parse::<wry::http::Uri>()
+            .unwrap();
+        assert!(!is_trusted_ipc_request(&request, &trusted, true));
+
+        assert!(is_trusted_navigation(
+            "https://example.invalid/",
+            &trusted,
+            false
+        ));
+        assert!(is_trusted_ipc_request(&request, &trusted, false));
+    }
+
+    #[test]
+    fn ipc_envelopes_are_bounded_before_worker_dispatch() {
+        let raw = serde_json::json!({
+            "id": "request-1",
+            "cmd": "mail.read",
+            "payload": {}
+        })
+        .to_string();
+        let parsed = parse_bounded_ipc_message(&raw, raw.len()).unwrap();
+        let message = serde_json::from_value::<IpcMessage>(parsed).unwrap();
+        assert!(ipc_envelope_is_bounded(&message));
+        assert!(parse_bounded_ipc_message(&raw, raw.len() - 1).is_none());
+
+        let oversized_id = IpcMessage {
+            id: "x".repeat(MAX_IPC_ID_BYTES + 1),
+            cmd: "mail.read".to_string(),
+            payload: serde_json::json!({}),
+        };
+        let oversized_command = IpcMessage {
+            id: "request-2".to_string(),
+            cmd: "x".repeat(MAX_IPC_COMMAND_BYTES + 1),
+            payload: serde_json::json!({}),
+        };
+        assert!(!ipc_envelope_is_bounded(&oversized_id));
+        assert!(!ipc_envelope_is_bounded(&oversized_command));
+    }
+
+    #[test]
+    fn ipc_worker_limit_releases_capacity_on_drop() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let first = try_acquire_ipc_worker(&in_flight, 2).unwrap();
+        let second = try_acquire_ipc_worker(&in_flight, 2).unwrap();
+        assert!(try_acquire_ipc_worker(&in_flight, 2).is_none());
+        drop(first);
+        let third = try_acquire_ipc_worker(&in_flight, 2).unwrap();
+        assert_eq!(in_flight.load(Ordering::Acquire), 2);
+        drop(second);
+        drop(third);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn resize_bounds_preserve_physical_pixels_at_high_dpi() {
         let bounds = physical_webview_bounds(2560, 1369);
 
@@ -735,6 +911,25 @@ impl Renderer for WebViewRenderer {
 
         let ipc_handler = self.ipc_handler.take();
         let webgpu_enabled = self._config.renderer.webgpu;
+        let restrict_origins = !self._config.renderer.trusted_origins.is_empty();
+        let trusted_origins = canonical_trusted_origins(&self._config.renderer.trusted_origins);
+        if restrict_origins && trusted_origins.is_empty() {
+            tracing::warn!(
+                "renderer origin restrictions are enabled, but no configured origin is valid"
+            );
+        }
+        let max_ipc_message_bytes = self
+            ._config
+            .renderer
+            .max_ipc_message_bytes
+            .clamp(1, HARD_MAX_IPC_MESSAGE_BYTES);
+        let max_ipc_in_flight = self
+            ._config
+            .renderer
+            .max_ipc_in_flight
+            .clamp(1, HARD_MAX_IPC_IN_FLIGHT);
+        let ipc_in_flight = Arc::new(AtomicUsize::new(0));
+        let ipc_worker_sequence = Arc::new(AtomicU64::new(1));
         let asset_root = self.asset_root.clone();
         let data_directory = self.data_directory.clone();
         let pending_windows: Vec<(u64, WindowConfig)> =
@@ -842,6 +1037,19 @@ impl Renderer for WebViewRenderer {
                         .with_devtools(cfg!(debug_assertions))
                         .with_initialization_script(Self::bridge_script());
 
+                        if restrict_origins {
+                            let navigation_origins = trusted_origins.clone();
+                            builder = builder
+                                .with_navigation_handler(move |url| {
+                                    is_trusted_navigation(
+                                        &url,
+                                        &navigation_origins,
+                                        restrict_origins,
+                                    )
+                                })
+                                .with_new_window_req_handler(|_, _| NewWindowResponse::Deny);
+                        }
+
                         let file_drop_outbox = outbox_for_loop.clone();
                         builder = builder.with_drag_drop_handler(move |event| {
                             enqueue_file_drop(&file_drop_outbox, event)
@@ -878,15 +1086,26 @@ impl Renderer for WebViewRenderer {
                             let win_queue = window_cmd_queue_for_ipc.clone();
                             let wake_proxy = event_loop_proxy.clone();
                             let _first_id = first_window_id.clone();
+                            let allowed_origins = trusted_origins.clone();
+                            let in_flight = Arc::clone(&ipc_in_flight);
+                            let worker_sequence = Arc::clone(&ipc_worker_sequence);
                             let rd_id = *rdesktop_id;
 
                             builder =
                                 builder.with_ipc_handler(move |req: wry::http::Request<String>| {
+                                    if !is_trusted_ipc_request(
+                                        req.uri(),
+                                        &allowed_origins,
+                                        restrict_origins,
+                                    ) {
+                                        return;
+                                    }
                                     let body = req.body();
 
                                     // Parse the JSON once so both the formal IPC envelope and
                                     // legacy top-level window commands remain supported.
-                                    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(body)
+                                    if let Some(raw) =
+                                        parse_bounded_ipc_message(body, max_ipc_message_bytes)
                                     {
                                         if let Some(cmd) =
                                             WebViewRenderer::parse_legacy_window_command(
@@ -901,6 +1120,9 @@ impl Renderer for WebViewRenderer {
                                         }
 
                                         if let Ok(msg) = serde_json::from_value::<IpcMessage>(raw) {
+                                            if !ipc_envelope_is_bounded(&msg) {
+                                                return;
+                                            }
                                             // Formal window command or regular IPC message.
                                             if let Some(cmd) =
                                                 WebViewRenderer::parse_window_command(&msg, rd_id)
@@ -909,6 +1131,27 @@ impl Renderer for WebViewRenderer {
                                                     q.push(cmd);
                                                 }
                                             } else {
+                                                let Some(permit) = try_acquire_ipc_worker(
+                                                    &in_flight,
+                                                    max_ipc_in_flight,
+                                                ) else {
+                                                    let response = IpcResponse {
+                                                        id: msg.id,
+                                                        success: false,
+                                                        data: serde_json::json!({
+                                                            "message": "IPC concurrency limit reached"
+                                                        }),
+                                                    };
+                                                    if let Ok(json) =
+                                                        serde_json::to_string(&response)
+                                                    {
+                                                        if let Ok(mut responses) = queue.lock() {
+                                                            responses.push((rd_id, json));
+                                                        }
+                                                    }
+                                                    let _ = wake_proxy.send_event(());
+                                                    return;
+                                                };
                                                 // Never run application RPC on the tao/WebView
                                                 // event-loop thread. A Git/network RPC may wait on
                                                 // credentials or a remote timeout; blocking here
@@ -928,14 +1171,37 @@ impl Renderer for WebViewRenderer {
                                                         }
                                                         let _ = response_wake.send_event(());
                                                     });
+                                                let sequence = worker_sequence
+                                                    .fetch_add(1, Ordering::Relaxed);
                                                 let thread_name =
-                                                    format!("rdesktop-ipc-{rd_id}-{}", msg.id);
-                                                let _ = std::thread::Builder::new()
+                                                    format!("rdesktop-ipc-{rd_id}-{sequence}");
+                                                let response_id = msg.id.clone();
+                                                if let Err(error) = std::thread::Builder::new()
                                                     .name(thread_name)
                                                     .spawn(move || {
+                                                        let _permit = permit;
                                                         request_handler
                                                             .handle_async(msg, response_sink)
-                                                    });
+                                                    })
+                                                {
+                                                    tracing::warn!(
+                                                        window_id = rd_id,
+                                                        "could not start bounded IPC worker: {error}"
+                                                    );
+                                                    let response = IpcResponse {
+                                                        id: response_id,
+                                                        success: false,
+                                                        data: serde_json::json!({
+                                                            "message": "IPC worker could not start"
+                                                        }),
+                                                    };
+                                                    if let Ok(json) = serde_json::to_string(&response)
+                                                    {
+                                                        if let Ok(mut responses) = queue.lock() {
+                                                            responses.push((rd_id, json));
+                                                        }
+                                                    }
+                                                }
                                             }
                                             let _ = wake_proxy.send_event(());
                                         }
