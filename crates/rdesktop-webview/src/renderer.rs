@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -105,6 +105,57 @@ fn ipc_envelope_is_bounded(message: &IpcMessage) -> bool {
 struct WindowEntry {
     window: Window,
     webview: WebView,
+    fullscreen_restore_maximized: Cell<bool>,
+}
+
+impl WindowEntry {
+    fn set_fullscreen(&self, fullscreen: bool) {
+        if fullscreen == self.window.fullscreen().is_some() {
+            return;
+        }
+        if fullscreen {
+            let maximized = cfg!(target_os = "windows") && self.window.is_maximized();
+            self.fullscreen_restore_maximized.set(maximized);
+            // Clear the maximized work-area constraint before requesting the
+            // monitor bounds. Otherwise Windows can keep WebView2 clipped at
+            // the old work-area height, leaving a taskbar-sized blank strip.
+            if maximized {
+                self.window.set_maximized(false);
+            }
+            self.window
+                .set_fullscreen(Some(tao::window::Fullscreen::Borderless(None)));
+        } else {
+            self.window.set_fullscreen(None);
+            if self.fullscreen_restore_maximized.replace(false) {
+                self.window.set_maximized(true);
+            }
+        }
+    }
+
+    fn publish_window_state(&self) {
+        let script = window_state_script(
+            self.window.is_maximized(),
+            self.window.fullscreen().is_some(),
+            self.window.is_focused(),
+            self.window.is_decorated(),
+        );
+        let _ = self.webview.evaluate_script(&script);
+    }
+}
+
+fn window_state_script(
+    maximized: bool,
+    fullscreen: bool,
+    focused: bool,
+    decorated: bool,
+) -> String {
+    let state = serde_json::json!({
+        "maximized": maximized,
+        "fullscreen": fullscreen,
+        "focused": focused,
+        "decorated": decorated,
+    });
+    format!("window.__RDESKTOP_WINDOW_STATE__ && window.__RDESKTOP_WINDOW_STATE__({state});")
 }
 
 fn serve_asset(root: &Path, request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
@@ -270,6 +321,7 @@ enum WindowAction {
     StartResize(tao::window::ResizeDirection),
     SetFullscreen(bool),
     SetDecorations(bool),
+    RequestState,
 }
 
 /// Convert rdesktop ResizeEdge to tao's ResizeDirection.
@@ -304,7 +356,19 @@ fn to_tao_resize(edge: ResizeEdge) -> tao::window::ResizeDirection {
 /// window.__RDESKTOP_WINDOW__.close()
 /// window.__RDESKTOP_WINDOW__.startDrag()       // drag from custom title bar
 /// window.__RDESKTOP_WINDOW__.startResize('bottom-right')  // resize from edge
+/// window.addEventListener('rdesktop:window-state', ({ detail }) => {
+///   // Boolean fields: maximized, fullscreen, focused, decorated.
+///   // Use this native acknowledgement, not an optimistic button toggle.
+///   console.log(detail);
+/// });
+/// window.__RDESKTOP_WINDOW__.setDecorations(false)
+/// window.__RDESKTOP_WINDOW__.requestState()
 /// ```
+/// A browser can exercise this sequence with a recording `window.ipc.postMessage`
+/// adapter. In a native window, also verify maximize → fullscreen → exit restores
+/// maximization, ordinary-window fullscreen fills the monitor, and closing a
+/// secondary window leaves the other windows alive. Before hiding decorations,
+/// the application must mount accessible caption controls and resize handles.
 pub struct WebViewRenderer {
     _config: AppConfig,
     ipc_handler: Option<Arc<dyn IpcHandler>>,
@@ -471,8 +535,16 @@ impl WebViewRenderer {
                 setDecorations: function(decorations) {
                     postWindowCommand('set_decorations', { value: !!decorations });
                 },
+                requestState: function() {
+                    postWindowCommand('request_state');
+                },
                 isMaximized: false,
                 isFullscreen: false
+            };
+            window.__RDESKTOP_WINDOW_STATE__ = function(state) {
+                window.__RDESKTOP_WINDOW__.isMaximized = state.maximized;
+                window.__RDESKTOP_WINDOW__.isFullscreen = state.fullscreen;
+                window.dispatchEvent(new CustomEvent('rdesktop:window-state', { detail: state }));
             };
         })();
         "#
@@ -517,6 +589,7 @@ impl WebViewRenderer {
                     let val = payload["value"].as_bool().unwrap_or(true);
                     WindowAction::SetDecorations(val)
                 }
+                "request_state" => WindowAction::RequestState,
                 _ => return None,
             };
             return Some(WindowCommand {
@@ -549,6 +622,40 @@ fn physical_webview_bounds(width: u32, height: u32) -> wry::Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_state_request_keeps_the_originating_window() {
+        let raw = serde_json::json!({ "__window__": true, "action": "request_state" });
+        assert!(matches!(
+            WebViewRenderer::parse_window_payload(&raw, 42),
+            Some(WindowCommand {
+                rdesktop_id: 42,
+                action: WindowAction::RequestState
+            })
+        ));
+        assert!(WebViewRenderer::parse_window_payload(
+            &serde_json::json!({ "action": "request_state" }),
+            42
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn window_state_contains_only_native_boolean_flags() {
+        let script = window_state_script(true, false, true, false);
+        let json = script
+            .split("__RDESKTOP_WINDOW_STATE__(")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(");");
+        let state: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            state,
+            serde_json::json!({
+                "maximized": true, "fullscreen": false, "focused": true, "decorated": false
+            })
+        );
+    }
 
     #[test]
     fn parses_formal_window_command_envelope() {
@@ -1003,7 +1110,7 @@ impl Renderer for WebViewRenderer {
                     let event_loop_proxy = event_loop_proxy.clone();
                     // Create all pending windows
                     for (rdesktop_id, window_config) in &pending_windows {
-                        let window = match WindowBuilder::new()
+                        let mut window_builder = WindowBuilder::new()
                             .with_title(&window_config.title)
                             .with_inner_size(tao::dpi::LogicalSize::new(
                                 window_config.width,
@@ -1013,9 +1120,16 @@ impl Renderer for WebViewRenderer {
                             .with_decorations(window_config.decorations)
                             .with_transparent(window_config.transparent)
                             .with_always_on_top(window_config.always_on_top)
-                            .with_window_icon(rdesktop_core::window_icon(window_config))
-                            .build(event_loop_target)
-                        {
+                            .with_window_icon(rdesktop_core::window_icon(window_config));
+                        if let Some((width, height)) = window_config.min_size {
+                            window_builder = window_builder
+                                .with_min_inner_size(tao::dpi::LogicalSize::new(width, height));
+                        }
+                        if let Some((width, height)) = window_config.max_size {
+                            window_builder = window_builder
+                                .with_max_inner_size(tao::dpi::LogicalSize::new(width, height));
+                        }
+                        let window = match window_builder.build(event_loop_target) {
                             Ok(w) => w,
                             Err(e) => {
                                 tracing::error!("Failed to create window {}: {}", rdesktop_id, e);
@@ -1217,7 +1331,9 @@ impl Renderer for WebViewRenderer {
                             }
                         };
 
-                        windows.insert(tao_id, WindowEntry { window, webview });
+                        windows.insert(tao_id, WindowEntry {
+                            window, webview, fullscreen_restore_maximized: Cell::new(false),
+                        });
                         rdesktop_to_tao.insert(*rdesktop_id, tao_id);
                         tao_to_rdesktop.insert(tao_id, *rdesktop_id);
 
@@ -1262,6 +1378,7 @@ impl Renderer for WebViewRenderer {
                         let _ = entry
                             .webview
                             .set_bounds(physical_webview_bounds(size.width, size.height));
+                        entry.publish_window_state();
                     }
                 }
 
@@ -1275,6 +1392,17 @@ impl Renderer for WebViewRenderer {
                             new_inner_size.width,
                             new_inner_size.height,
                         ));
+                        entry.publish_window_state();
+                    }
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::Focused(_),
+                    window_id,
+                    ..
+                } => {
+                    if let Some(entry) = windows.get(&window_id) {
+                        entry.publish_window_state();
                     }
                 }
 
@@ -1315,6 +1443,16 @@ impl Renderer for WebViewRenderer {
                         queue.drain(..).collect()
                     };
                     for cmd in commands {
+                        if matches!(cmd.action, WindowAction::Close) {
+                            if let Some(tao_id) = rdesktop_to_tao.remove(&cmd.rdesktop_id) {
+                                tao_to_rdesktop.remove(&tao_id);
+                                windows.remove(&tao_id);
+                                if windows.is_empty() {
+                                    *control_flow = ControlFlow::Exit;
+                                }
+                            }
+                            continue;
+                        }
                         if let Some(tao_id) = rdesktop_to_tao.get(&cmd.rdesktop_id) {
                             if let Some(entry) = windows.get(tao_id) {
                                 match cmd.action {
@@ -1325,9 +1463,7 @@ impl Renderer for WebViewRenderer {
                                         let is_max = entry.window.is_maximized();
                                         entry.window.set_maximized(!is_max);
                                     }
-                                    WindowAction::Close => {
-                                        *control_flow = ControlFlow::Exit;
-                                    }
+                                    WindowAction::Close => unreachable!("handled before borrowing the window"),
                                     WindowAction::StartDrag => {
                                         let _ = entry.window.drag_window();
                                     }
@@ -1335,18 +1471,14 @@ impl Renderer for WebViewRenderer {
                                         let _ = entry.window.drag_resize_window(dir);
                                     }
                                     WindowAction::SetFullscreen(fs) => {
-                                        if fs {
-                                            entry.window.set_fullscreen(Some(
-                                                tao::window::Fullscreen::Borderless(None),
-                                            ));
-                                        } else {
-                                            entry.window.set_fullscreen(None);
-                                        }
+                                        entry.set_fullscreen(fs);
                                     }
                                     WindowAction::SetDecorations(decorations) => {
                                         entry.window.set_decorations(decorations);
                                     }
+                                    WindowAction::RequestState => {}
                                 }
+                                entry.publish_window_state();
                             }
                         }
                     }
@@ -1437,13 +1569,7 @@ impl WebViewRenderer {
             }
             PendingOp::SetFullscreen(rd_id, fs) => {
                 if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    if *fs {
-                        entry
-                            .window
-                            .set_fullscreen(Some(tao::window::Fullscreen::Borderless(None)));
-                    } else {
-                        entry.window.set_fullscreen(None);
-                    }
+                    entry.set_fullscreen(*fs);
                 }
             }
             PendingOp::StartDrag(rd_id) => {
