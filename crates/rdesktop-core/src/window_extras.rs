@@ -53,8 +53,8 @@ mod windows {
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, FindWindowExW, FindWindowW, GetWindowLongPtrW, GetWindowRect,
-        SendMessageTimeoutW, SetParent, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_BOTTOM,
+        EnumWindows, FindWindowExW, FindWindowW, GetWindowLongW, GetWindowRect,
+        SendMessageTimeoutW, SetParent, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_BOTTOM,
         SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
         WS_EX_LAYERED, WS_EX_TRANSPARENT,
     };
@@ -74,9 +74,10 @@ mod windows {
                 center_and_fit_to_work_area(hwnd);
             }
             if click_through {
-                let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                let new_ex = ex | (WS_EX_LAYERED as isize) | (WS_EX_TRANSPARENT as isize);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex);
+                // Extended styles are 32-bit flags on both Windows architectures.
+                let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+                let new_ex = ex | (WS_EX_LAYERED as i32) | (WS_EX_TRANSPARENT as i32);
+                SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex);
             }
             if is_wallpaper {
                 if let Some(worker) = find_desktop_workerw() {
