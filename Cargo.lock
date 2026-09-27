@@ -2455,6 +2455,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "url",
+ "windows-sys 0.61.2",
  "wry",
 ]
 

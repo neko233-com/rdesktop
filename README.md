@@ -119,6 +119,27 @@ The core workspace includes abstractions and platform implementations for:
 - global hotkeys and opt-in global input hooks;
 - structured IPC between Rust and the frontend.
 
+On Windows WebView2, mark non-interactive custom title-bar regions with
+`-webkit-app-region: drag`. WebView2 then handles dragging, double-click
+maximize/restore and the right-click system menu from the original native
+mouse event. Keep buttons and menus outside those regions, or give them
+`-webkit-app-region: no-drag`. The `startDrag()` bridge remains available as
+a fallback for renderers without native CSS drag regions.
+
+Undecorated Windows WebView windows have a native four-DIP resize border
+above the WebView. Its eight resize directions do not wait for JavaScript
+IPC. It is hidden while maximized, minimized or fullscreen. Switching window
+decorations preserves the client dimensions, and configured minimum/maximum
+dimensions include the client area even when Windows retains invisible frame
+insets. Minimized icon dimensions are never applied as WebView bounds.
+
+For repeatable development inspection, query `GET /__rdesktop__/agent/dom`
+and `GET /__rdesktop__/agent/elements?selector=%5Brole%3Dmenubar%5D` on the
+application's loopback Agent port. The DOM can confirm controls and ARIA
+shortcuts; verify resizing and window state in the real native window and
+its `rdesktop_webview=debug` resize log. Browser snapshots cannot prove
+native mouse handling or client-area dimensions.
+
 ## Quick start
 
 ### Install the CLI

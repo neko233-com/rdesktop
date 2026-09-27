@@ -105,10 +105,45 @@ fn ipc_envelope_is_bounded(message: &IpcMessage) -> bool {
 struct WindowEntry {
     window: Window,
     webview: WebView,
+    #[cfg(target_os = "windows")]
+    resize_border: Option<crate::windows_frame::NativeResizeBorder>,
     fullscreen_restore_maximized: Cell<bool>,
 }
 
 impl WindowEntry {
+    fn set_decorations(&self, decorations: bool) {
+        if decorations == self.window.is_decorated() {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        let previous_size = (!self.window.is_maximized()
+            && !self.window.is_minimized()
+            && self.window.fullscreen().is_none())
+        .then(|| self.window.inner_size());
+        self.window.set_decorations(decorations);
+        #[cfg(target_os = "windows")]
+        if let Some(size) = previous_size {
+            if let Err(error) =
+                crate::windows_frame::preserve_client_size(&self.window, size.width, size.height)
+            {
+                tracing::warn!(%error, "Could not preserve client size while changing decorations");
+            }
+        }
+    }
+
+    fn start_drag(&self, edge: Option<tao::window::ResizeDirection>) {
+        #[cfg(target_os = "windows")]
+        let result = crate::windows_drag::start(&self.window, edge);
+        #[cfg(not(target_os = "windows"))]
+        let result = match edge {
+            Some(edge) => self.window.drag_resize_window(edge),
+            None => self.window.drag_window(),
+        };
+        if let Err(error) = result {
+            tracing::warn!(?edge, %error, "Native window move/resize failed");
+        }
+    }
+
     fn set_fullscreen(&self, fullscreen: bool) {
         if fullscreen == self.window.fullscreen().is_some() {
             return;
@@ -133,6 +168,12 @@ impl WindowEntry {
     }
 
     fn publish_window_state(&self) {
+        #[cfg(target_os = "windows")]
+        if let Some(border) = &self.resize_border {
+            if let Err(error) = border.update(&self.window) {
+                tracing::warn!(%error, "Native resize border update failed");
+            }
+        }
         let script = window_state_script(
             self.window.is_maximized(),
             self.window.fullscreen().is_some(),
@@ -1331,8 +1372,19 @@ impl Renderer for WebViewRenderer {
                             }
                         };
 
+                        #[cfg(target_os = "windows")]
+                        let resize_border = match crate::windows_frame::NativeResizeBorder::new(
+                            &window, window_config.min_size.is_some(), window_config.max_size.is_some()) {
+                            Ok(border) => Some(border),
+                            Err(error) => {
+                                tracing::warn!(%error, "Native resize border initialization failed");
+                                None
+                            }
+                        };
                         windows.insert(tao_id, WindowEntry {
                             window, webview, fullscreen_restore_maximized: Cell::new(false),
+                            #[cfg(target_os = "windows")]
+                            resize_border,
                         });
                         rdesktop_to_tao.insert(*rdesktop_id, tao_id);
                         tao_to_rdesktop.insert(tao_id, *rdesktop_id);
@@ -1371,13 +1423,19 @@ impl Renderer for WebViewRenderer {
                     ..
                 } => {
                     if let Some(entry) = windows.get(&window_id) {
+                        tracing::debug!(inner = ?size, scale = entry.window.scale_factor(), minimized = entry.window.is_minimized(), "Native window resized");
                         // tao reports Resized in physical pixels. Re-wrapping those
                         // values as LogicalSize multiplies the WebView bounds by the
                         // monitor scale factor (for example 1.5x at 150% DPI), which
                         // clips bottom-docked UI outside the native client area.
-                        let _ = entry
-                            .webview
-                            .set_bounds(physical_webview_bounds(size.width, size.height));
+                        // Minimized Windows report icon dimensions. Resizing the
+                        // WebView to those dimensions can restore the parent and
+                        // violates the native minimize operation.
+                        if !entry.window.is_minimized() {
+                            let _ = entry
+                                .webview
+                                .set_bounds(physical_webview_bounds(size.width, size.height));
+                        }
                         entry.publish_window_state();
                     }
                 }
@@ -1465,16 +1523,17 @@ impl Renderer for WebViewRenderer {
                                     }
                                     WindowAction::Close => unreachable!("handled before borrowing the window"),
                                     WindowAction::StartDrag => {
-                                        let _ = entry.window.drag_window();
+                                        entry.start_drag(None);
                                     }
                                     WindowAction::StartResize(dir) => {
-                                        let _ = entry.window.drag_resize_window(dir);
+                                        tracing::debug!(?dir, inner = ?entry.window.inner_size(), outer = ?entry.window.outer_size(), "Native window resize requested");
+                                        entry.start_drag(Some(dir));
                                     }
                                     WindowAction::SetFullscreen(fs) => {
                                         entry.set_fullscreen(fs);
                                     }
                                     WindowAction::SetDecorations(decorations) => {
-                                        entry.window.set_decorations(decorations);
+                                        entry.set_decorations(decorations);
                                     }
                                     WindowAction::RequestState => {}
                                 }
@@ -1574,17 +1633,17 @@ impl WebViewRenderer {
             }
             PendingOp::StartDrag(rd_id) => {
                 if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    let _ = entry.window.drag_window();
+                    entry.start_drag(None);
                 }
             }
             PendingOp::StartResize(rd_id, dir) => {
                 if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    let _ = entry.window.drag_resize_window(*dir);
+                    entry.start_drag(Some(*dir));
                 }
             }
             PendingOp::SetDecorations(rd_id, decorations) => {
                 if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry.window.set_decorations(*decorations);
+                    entry.set_decorations(*decorations);
                 }
             }
             PendingOp::SetAlwaysOnTop(rd_id, always) => {
