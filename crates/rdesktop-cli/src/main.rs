@@ -7,7 +7,7 @@
 //!   rdesktop bundle          - Package into installer
 //!   rdesktop icons           - Generate multi-size ICO/PNG assets
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -302,7 +302,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Start the dev server. This is the core of Agent-first development.
-async fn cmd_dev(path: &PathBuf, port: Option<u16>, no_open: bool) -> anyhow::Result<()> {
+async fn cmd_dev(path: &Path, port: Option<u16>, no_open: bool) -> anyhow::Result<()> {
     let config_path = path.join("rdesktop.toml");
 
     // Load config or use defaults
@@ -374,14 +374,14 @@ async fn cmd_dev(path: &PathBuf, port: Option<u16>, no_open: bool) -> anyhow::Re
     Ok(())
 }
 
-fn cmd_build(_path: &PathBuf, chrome: bool) -> anyhow::Result<()> {
+fn cmd_build(_path: &Path, chrome: bool) -> anyhow::Result<()> {
     let renderer = if chrome { "chrome" } else { "webview" };
     println!("Building with {} renderer...", renderer);
     println!("Build complete!");
     Ok(())
 }
 
-fn cmd_bundle(path: &PathBuf, target: Option<String>, all: bool) -> anyhow::Result<()> {
+fn cmd_bundle(path: &Path, target: Option<String>, all: bool) -> anyhow::Result<()> {
     let config_path = path.join("rdesktop.toml");
     let config_str = std::fs::read_to_string(&config_path).unwrap_or_else(|_| {
         r#"
@@ -432,7 +432,7 @@ version = "0.1.0"
     Ok(())
 }
 
-fn cmd_info(path: &PathBuf) -> anyhow::Result<()> {
+fn cmd_info(path: &Path) -> anyhow::Result<()> {
     let config_path = path.join("rdesktop.toml");
     if !config_path.exists() {
         println!("No rdesktop.toml found at {}", path.display());

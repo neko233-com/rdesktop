@@ -113,7 +113,7 @@ impl Key {
             _ => {
                 if t.len() > 1 && t.starts_with('f') {
                     if let Ok(n) = t[1..].parse::<u8>() {
-                        if n >= 1 && n <= 24 {
+                        if (1..=24).contains(&n) {
                             return Some(Key::F(n));
                         }
                     }
@@ -206,6 +206,8 @@ impl FromStr for Hotkey {
 /// Callback invoked when a registered hotkey fires.
 pub trait HotkeyHandler: Send + Sync {
     fn on_hotkey(&self, id: u32, hotkey: &Hotkey);
+    /// A native key-up notification, when supported by the platform backend.
+    fn on_hotkey_released(&self, _id: u32, _hotkey: &Hotkey) {}
 }
 
 /// Platform-independent manager for global hotkeys.

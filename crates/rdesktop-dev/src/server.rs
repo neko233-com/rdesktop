@@ -1040,6 +1040,27 @@ fn timestamp() -> String {
         .to_string()
 }
 
+/// Update the stored DOM snapshot from the browser.
+async fn update_dom(
+    AxumState(state): AxumState<DevServerState>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let html = body["html"].as_str().unwrap_or("").to_string();
+    let mut snapshot = state.last_dom_snapshot.write().await;
+    *snapshot = Some(html);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Update the stored app state from the browser.
+async fn update_state(
+    AxumState(state): AxumState<DevServerState>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let mut app_state = state.last_app_state.write().await;
+    *app_state = Some(body);
+    Json(serde_json::json!({ "ok": true }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1187,25 +1208,4 @@ mod tests {
             1
         );
     }
-}
-
-/// Update the stored DOM snapshot from the browser.
-async fn update_dom(
-    AxumState(state): AxumState<DevServerState>,
-    Json(body): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let html = body["html"].as_str().unwrap_or("").to_string();
-    let mut snapshot = state.last_dom_snapshot.write().await;
-    *snapshot = Some(html);
-    Json(serde_json::json!({ "ok": true }))
-}
-
-/// Update the stored app state from the browser.
-async fn update_state(
-    AxumState(state): AxumState<DevServerState>,
-    Json(body): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let mut app_state = state.last_app_state.write().await;
-    *app_state = Some(body);
-    Json(serde_json::json!({ "ok": true }))
 }

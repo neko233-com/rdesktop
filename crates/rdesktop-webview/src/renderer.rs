@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use rdesktop_core::config::{AppConfig, WindowConfig};
 use rdesktop_core::ipc::{IpcHandler, IpcMessage, IpcResponse, IpcResponseSender};
@@ -236,6 +237,27 @@ fn serve_asset(root: &Path, request: Request<Vec<u8>>) -> Response<Cow<'static, 
     }
 }
 
+fn serve_embedded_asset(
+    assets: &HashMap<String, &'static [u8]>,
+    request: Request<Vec<u8>>,
+) -> Response<Cow<'static, [u8]>> {
+    let decoded = percent_encoding::percent_decode_str(request.uri().path()).decode_utf8_lossy();
+    let path = decoded.trim_start_matches('/');
+    if path.contains('\\') || path.split('/').any(|part| part == ".." || part == ".") {
+        return asset_response(403, "text/plain; charset=utf-8", b"forbidden".to_vec());
+    }
+    let path = if path.is_empty() { "index.html" } else { path };
+    match assets.get(path) {
+        Some(bytes) => Response::builder()
+            .status(200)
+            .header("Content-Type", content_type(Path::new(path)))
+            .header("Cache-Control", "no-cache")
+            .body(Cow::Borrowed(*bytes))
+            .expect("valid embedded asset response"),
+        None => asset_response(404, "text/plain; charset=utf-8", b"not found".to_vec()),
+    }
+}
+
 fn asset_response(status: u16, content_type: &str, body: Vec<u8>) -> Response<Cow<'static, [u8]>> {
     Response::builder()
         .status(status)
@@ -294,12 +316,12 @@ fn file_drop_message(event: DragDropEvent) -> Option<String> {
     Some(payload.to_string())
 }
 
-fn enqueue_file_drop(outbox: &Arc<Mutex<Vec<String>>>, event: DragDropEvent) -> bool {
+fn enqueue_file_drop(outbox: &IpcResponseQueue, id: u64, event: DragDropEvent) -> bool {
     let Some(message) = file_drop_message(event) else {
         return true;
     };
     match outbox.lock() {
-        Ok(mut queue) if queue.len() < 256 => queue.push(message),
+        Ok(mut queue) if queue.len() < 256 => queue.push((id, message)),
         Ok(_) => tracing::warn!("Dropping file-drop event because the frontend outbox is full"),
         Err(_) => tracing::error!("Could not lock frontend outbox for a file-drop event"),
     }
@@ -412,11 +434,15 @@ fn to_tao_resize(edge: ResizeEdge) -> tao::window::ResizeDirection {
 /// the application must mount accessible caption controls and resize handles.
 pub struct WebViewRenderer {
     _config: AppConfig,
+    native_runtime: crate::runtime::NativeRuntime,
+    native_events: Option<crate::runtime::NativeEventHandler>,
+    resident: bool,
     ipc_handler: Option<Arc<dyn IpcHandler>>,
     pending_windows: RefCell<Vec<(u64, WindowConfig)>>,
     pending_ops: RefCell<Vec<PendingOp>>,
     next_window_id: RefCell<u64>,
     asset_root: Option<PathBuf>,
+    embedded_assets: Option<Arc<HashMap<String, &'static [u8]>>>,
     data_directory: Option<PathBuf>,
     /// External outbox for native → frontend pushes (e.g. a Node extension
     /// host asking the UI to show a message or apply an editor edit). Drained
@@ -428,11 +454,15 @@ impl WebViewRenderer {
     pub fn new(config: &AppConfig) -> Result<Self> {
         Ok(Self {
             _config: config.clone(),
+            native_runtime: Default::default(),
+            native_events: None,
+            resident: false,
             ipc_handler: None,
             pending_windows: RefCell::new(Vec::new()),
             pending_ops: RefCell::new(Vec::new()),
             next_window_id: RefCell::new(1),
             asset_root: None,
+            embedded_assets: None,
             data_directory: None,
             outbox: Arc::new(Mutex::new(Vec::new())),
         })
@@ -459,6 +489,39 @@ impl WebViewRenderer {
             )));
         }
         self.asset_root = Some(root);
+        self.embedded_assets = None;
+        Ok(())
+    }
+
+    /// Serve immutable assets compiled into the application, without writable
+    /// frontend files beside the installed executable. Keys are URL paths
+    /// relative to the root, for example `index.html` and `assets/main.js`.
+    pub fn set_embedded_assets(
+        &mut self,
+        assets: impl IntoIterator<Item = (String, &'static [u8])>,
+    ) -> Result<()> {
+        let mut map = HashMap::new();
+        for (key, bytes) in assets {
+            if key.is_empty()
+                || key.starts_with('/')
+                || key.contains(['\\', ':', '?', '#'])
+                || key
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+                || map.insert(key.clone(), bytes).is_some()
+            {
+                return Err(RdesktopError::Config(format!(
+                    "invalid or duplicate embedded asset: {key}"
+                )));
+            }
+        }
+        if !map.contains_key("index.html") {
+            return Err(RdesktopError::Config(
+                "embedded assets must contain index.html".into(),
+            ));
+        }
+        self.embedded_assets = Some(Arc::new(map));
+        self.asset_root = None;
         Ok(())
     }
 
@@ -492,6 +555,19 @@ impl WebViewRenderer {
     /// emitted as `window.__RDESKTOP_IPC__(<json>)`.
     pub fn set_outbox(&mut self, outbox: Arc<Mutex<Vec<String>>>) {
         self.outbox = outbox;
+    }
+
+    /// Access native windows from application workers while the event loop runs.
+    pub fn native_runtime(&self) -> crate::runtime::NativeRuntime {
+        self.native_runtime.clone()
+    }
+    /// Resident applications decide when the process exits and handle close requests.
+    /// Callbacks must only enqueue work; they run on the event-loop thread.
+    pub fn set_native_event_handler(&mut self, handler: crate::runtime::NativeEventHandler) {
+        self.native_events = Some(handler);
+    }
+    pub fn set_resident(&mut self, resident: bool) {
+        self.resident = resident;
     }
 
     fn next_id(&self) -> u64 {
@@ -660,9 +736,895 @@ fn physical_webview_bounds(width: u32, height: u32) -> wry::Rect {
     }
 }
 
+impl Renderer for WebViewRenderer {
+    fn init(&mut self) -> Result<()> {
+        tracing::info!("Initializing WebView renderer");
+        Ok(())
+    }
+
+    fn create_window(&mut self, config: &WindowConfig) -> Result<WindowHandle> {
+        let id = self.next_id();
+        self.pending_windows.borrow_mut().push((id, config.clone()));
+        tracing::info!(window_id = id, "Window queued for creation");
+        Ok(WindowHandle::new(id))
+    }
+
+    fn load_url(&self, window: WindowHandle, url: &str) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::LoadUrl(window.id(), url.to_string()));
+        Ok(())
+    }
+
+    fn load_html(&self, window: WindowHandle, html: &str) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::LoadHtml(window.id(), html.to_string()));
+        Ok(())
+    }
+
+    fn eval_script(&self, window: WindowHandle, script: &str) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::EvalScript(window.id(), script.to_string()));
+        Ok(())
+    }
+
+    fn set_ipc_handler(&mut self, handler: Box<dyn IpcHandler>) {
+        self.ipc_handler = Some(Arc::from(handler));
+    }
+
+    fn send_to_frontend(&self, window: WindowHandle, message: &str) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SendToFrontend(window.id(), message.to_string()));
+        Ok(())
+    }
+
+    fn set_title(&self, window: WindowHandle, title: &str) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SetTitle(window.id(), title.to_string()));
+        Ok(())
+    }
+
+    fn set_size(&self, window: WindowHandle, width: u32, height: u32) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SetSize(window.id(), width, height));
+        Ok(())
+    }
+
+    fn set_resizable(&self, window: WindowHandle, resizable: bool) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SetResizable(window.id(), resizable));
+        Ok(())
+    }
+
+    fn set_visible(&self, window: WindowHandle, visible: bool) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SetVisible(window.id(), visible));
+        Ok(())
+    }
+
+    fn close_window(&mut self, window: WindowHandle) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::Close(window.id()));
+        Ok(())
+    }
+
+    // ── Frameless / Window Controls ─────────────────────────────
+
+    fn minimize_window(&self, window: WindowHandle) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::Minimize(window.id()));
+        Ok(())
+    }
+
+    fn maximize_window(&self, window: WindowHandle) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::Maximize(window.id()));
+        Ok(())
+    }
+
+    fn is_maximized(&self, _window: WindowHandle) -> Result<bool> {
+        // This needs to be checked inside the event loop; return false for now.
+        // In practice, the frontend can track this via window state events.
+        Ok(false)
+    }
+
+    fn set_fullscreen(&self, window: WindowHandle, fullscreen: bool) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SetFullscreen(window.id(), fullscreen));
+        Ok(())
+    }
+
+    fn is_fullscreen(&self, _window: WindowHandle) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn start_drag(&self, window: WindowHandle) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::StartDrag(window.id()));
+        Ok(())
+    }
+
+    fn start_resize(&self, window: WindowHandle, edge: ResizeEdge) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::StartResize(window.id(), to_tao_resize(edge)));
+        Ok(())
+    }
+
+    fn set_decorations(&self, window: WindowHandle, decorations: bool) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SetDecorations(window.id(), decorations));
+        Ok(())
+    }
+
+    fn set_always_on_top(&self, window: WindowHandle, always: bool) -> Result<()> {
+        self.pending_ops
+            .borrow_mut()
+            .push(PendingOp::SetAlwaysOnTop(window.id(), always));
+        Ok(())
+    }
+
+    // ── Event Loop ──────────────────────────────────────────────
+
+    fn run(mut self: Box<Self>) -> Result<()> {
+        tracing::info!("Starting WebView event loop");
+
+        let ipc_handler = self.ipc_handler.take();
+        let webgpu_enabled = self._config.renderer.webgpu;
+        let restrict_origins = !self._config.renderer.trusted_origins.is_empty();
+        let trusted_origins = canonical_trusted_origins(&self._config.renderer.trusted_origins);
+        if restrict_origins && trusted_origins.is_empty() {
+            tracing::warn!(
+                "renderer origin restrictions are enabled, but no configured origin is valid"
+            );
+        }
+        let max_ipc_message_bytes = self
+            ._config
+            .renderer
+            .max_ipc_message_bytes
+            .clamp(1, HARD_MAX_IPC_MESSAGE_BYTES);
+        let max_ipc_in_flight = self
+            ._config
+            .renderer
+            .max_ipc_in_flight
+            .clamp(1, HARD_MAX_IPC_IN_FLIGHT);
+        let ipc_in_flight = Arc::new(AtomicUsize::new(0));
+        let ipc_worker_sequence = Arc::new(AtomicU64::new(1));
+        let asset_root = self.asset_root.clone();
+        let embedded_assets = self.embedded_assets.clone();
+        let data_directory = self.data_directory.clone();
+        let mut pending_windows: Vec<(u64, WindowConfig)> =
+            self.pending_windows.borrow_mut().drain(..).collect();
+        let pending_ops: Vec<PendingOp> = self.pending_ops.borrow_mut().drain(..).collect();
+
+        let ipc_response_queue: IpcResponseQueue = Arc::new(Mutex::new(Vec::new()));
+        let ipc_queue_for_handler = ipc_response_queue.clone();
+
+        // External outbox for native → frontend pushes (Node extension host, etc.)
+        let outbox_for_loop = self.outbox.clone();
+
+        // ── Phase 2: global hotkeys & input hooks ───────────────────────
+        // Wired through the shared outbox so the frontend receives them as
+        // `window.__RDESKTOP_PUSH__` events (`rdesktop.globalHotkey` /
+        // `rdesktop.globalInput`). Managers live for the whole event loop.
+        let global_handler = rdesktop_core::PushHandler::new(self.outbox.clone());
+        let _hotkey_manager = {
+            let mgr = rdesktop_core::HotkeyManager::new(global_handler.clone());
+            for (i, hc) in self._config.hotkeys.iter().enumerate() {
+                if let Ok(hk) = hc.combo.parse::<rdesktop_core::Hotkey>() {
+                    let id = i as u32 + 1;
+                    if let Err(e) = mgr.register(id, &hk) {
+                        tracing::warn!("failed to register hotkey {:?}: {}", hc.combo, e);
+                    }
+                } else {
+                    tracing::warn!("invalid hotkey combo: {:?}", hc.combo);
+                }
+            }
+            mgr
+        };
+        let _input_manager = if self._config.global_input.enabled {
+            let mut inp = rdesktop_core::GlobalInput::new(global_handler.clone());
+            if self._config.global_input.mouse_move {
+                inp = inp.with_mouse_move(true);
+            }
+            match inp.start() {
+                Ok(()) => Some(inp),
+                Err(e) => {
+                    tracing::warn!("failed to start global input: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Window command queue for IPC-triggered window operations
+        let window_cmd_queue: WindowCommandQueue = Arc::new(Mutex::new(Vec::new()));
+        let window_cmd_queue_for_ipc = window_cmd_queue.clone();
+
+        // Build a map of rdesktop_id -> first tao_id for the IPC handler
+        // (the IPC handler needs to know which window to operate on)
+        let first_window_id: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+
+        let event_loop = EventLoopBuilder::new().build();
+        let event_loop_proxy = event_loop.create_proxy();
+        let native_runtime = self.native_runtime.clone();
+        let native_events = self.native_events.clone();
+        let resident = self.resident;
+        let native_wake = event_loop_proxy.clone();
+        native_runtime.set_wake(Arc::new(move || {
+            let _ = native_wake.send_event(());
+        }));
+        let mut windows: HashMap<WindowId, WindowEntry> = HashMap::new();
+        let mut rdesktop_to_tao: HashMap<u64, WindowId> = HashMap::new();
+        let mut tao_to_rdesktop: HashMap<WindowId, u64> = HashMap::new();
+        // Keep the context alive for the entire event loop. On Windows this
+        // binds WebView2 storage to the caller-selected per-user directory,
+        // instead of the replaceable executable directory.
+        let mut web_context = data_directory.map(|path| WebContext::new(Some(path)));
+        let mut partition_contexts: HashMap<PathBuf, WebContext> = HashMap::new();
+
+        type CreationReply = std::sync::mpsc::SyncSender<std::result::Result<u64, String>>;
+        let mut initial_content: HashMap<
+            u64,
+            (crate::runtime::NativeWindowOptions, CreationReply),
+        > = HashMap::new();
+        event_loop.run(move |event, event_loop_target, control_flow| {
+            *control_flow = ControlFlow::Wait;
+
+            let requests = native_runtime.drain();
+            let mut deferred = Vec::new();
+            for request in requests {
+                match request {
+                    crate::runtime::Request::Create { id, config, options, reply, deadline } => {
+                        if Instant::now() >= deadline { continue; }
+                        initial_content.insert(id, (*options, reply));
+                        pending_windows.push((id, config));
+                    }
+                    request => deferred.push(request),
+                }
+            }
+                    // Create all pending windows
+                    for (rdesktop_id, window_config) in pending_windows.drain(..) {
+                        let rdesktop_id = &rdesktop_id;
+                        let mut window_builder = WindowBuilder::new()
+                            .with_title(&window_config.title)
+                            .with_visible(!resident)
+                            .with_inner_size(tao::dpi::LogicalSize::new(
+                                window_config.width,
+                                window_config.height,
+                            ))
+                            .with_resizable(window_config.resizable)
+                            .with_decorations(window_config.decorations)
+                            .with_transparent(window_config.transparent)
+                            .with_always_on_top(window_config.always_on_top)
+                            .with_window_icon(rdesktop_core::window_icon(&window_config));
+                        if let Some((width, height)) = window_config.min_size {
+                            window_builder = window_builder
+                                .with_min_inner_size(tao::dpi::LogicalSize::new(width, height));
+                        }
+                        if let Some((width, height)) = window_config.max_size {
+                            window_builder = window_builder
+                                .with_max_inner_size(tao::dpi::LogicalSize::new(width, height));
+                        }
+                        let window = match window_builder.build(event_loop_target) {
+                            Ok(w) => w,
+                            Err(e) => {
+                                tracing::error!("Failed to create window {}: {}", rdesktop_id, e);
+                                if let Some((_, reply)) = initial_content.remove(rdesktop_id) { let _ = reply.send(Err(e.to_string())); }
+                                continue;
+                            }
+                        };
+
+                        let tao_id = window.id();
+
+                        // Realize wallpaper/overlay/click-through window attributes.
+                        rdesktop_core::apply_window_attributes(&window, &window_config);
+
+                        let partition = initial_content.get(rdesktop_id).and_then(|c| c.0.data_directory.clone());
+                        let context = if let Some(partition) = partition {
+                            Some(partition_contexts.entry(partition.clone()).or_insert_with(|| WebContext::new(Some(partition))))
+                        } else { web_context.as_mut() };
+                        let mut builder = if let Some(context) = context {
+                            WebViewBuilder::new_with_web_context(context)
+                        } else {
+                            WebViewBuilder::new()
+                        }
+                        .with_url(initial_content.get(rdesktop_id).map(|c| c.0.url.as_str()).unwrap_or("about:blank"))
+                        .with_devtools(cfg!(debug_assertions))
+                        .with_initialization_script(Self::bridge_script());
+                        let ipc_enabled = initial_content.get(rdesktop_id).map(|c| c.0.ipc_enabled).unwrap_or(true);
+                        if let Some((options, _)) = initial_content.get(rdesktop_id) {
+                            builder = builder.with_initialization_script(&options.initialization_script);
+                        }
+
+                        if restrict_origins {
+                            let navigation_origins = trusted_origins.clone();
+                            builder = builder
+                                .with_navigation_handler(move |url| {
+                                    is_trusted_navigation(
+                                        &url,
+                                        &navigation_origins,
+                                        restrict_origins,
+                                    )
+                                })
+                                .with_new_window_req_handler(|_, _| NewWindowResponse::Deny);
+                        }
+
+                        if initial_content.get(rdesktop_id).map(|c| c.0.native_drag_drop).unwrap_or(true) {
+                            let file_drop_outbox = ipc_queue_for_handler.clone();
+                            let drop_target = *rdesktop_id;
+                            builder = builder.with_drag_drop_handler(move |event| {
+                                enqueue_file_drop(&file_drop_outbox, drop_target, event)
+                            });
+                        }
+
+                        if let Some(assets) = embedded_assets.clone() {
+                            builder = builder.with_custom_protocol(
+                                "rdesktop".to_string(),
+                                move |_webview_id, request| serve_embedded_asset(&assets, request),
+                            );
+                        } else if let Some(root) = asset_root.clone() {
+                            builder = builder.with_custom_protocol(
+                                "rdesktop".to_string(),
+                                move |_webview_id, request| serve_asset(&root, request),
+                            );
+                        }
+
+                        // Enable WebGPU in the web context when requested, so the
+                        // frontend can drive native shaders (wallpaper effects).
+                        if window_config.transparent {
+                            builder = builder.with_transparent(true);
+                        }
+                        // Enable WebGPU in the web context so the frontend can
+                        // drive native shaders (wallpaper effects). On Windows
+                        // WebView2/Edge needs the feature flag; on macOS WKWebView
+                        // exposes WebGPU natively and on Linux WebKitGTK enables it
+                        // via a different path, so the args are Windows-only.
+                        #[cfg(target_os = "windows")]
+                        if webgpu_enabled {
+                            builder = builder.with_additional_browser_args(
+                                "--enable-features=Vulkan,WebGPU --enable-unsafe-webgpu",
+                            );
+                        }
+
+                        // Wire up IPC handler
+                        if let Some(handler) = ipc_handler.as_ref().filter(|_| ipc_enabled) {
+                            let handler = handler.clone();
+                            let queue = ipc_queue_for_handler.clone();
+                            let win_queue = window_cmd_queue_for_ipc.clone();
+                            let wake_proxy = event_loop_proxy.clone();
+                                                        let allowed_origins = trusted_origins.clone();
+                            let in_flight = Arc::clone(&ipc_in_flight);
+                            let worker_sequence = Arc::clone(&ipc_worker_sequence);
+                            let rd_id = *rdesktop_id;
+
+                            builder =
+                                builder.with_ipc_handler(move |req: wry::http::Request<String>| {
+                                    if !is_trusted_ipc_request(
+                                        req.uri(),
+                                        &allowed_origins,
+                                        restrict_origins,
+                                    ) {
+                                        return;
+                                    }
+                                    let body = req.body();
+
+                                    // Parse the JSON once so both the formal IPC envelope and
+                                    // legacy top-level window commands remain supported.
+                                    if let Some(raw) =
+                                        parse_bounded_ipc_message(body, max_ipc_message_bytes)
+                                    {
+                                        if let Some(cmd) =
+                                            WebViewRenderer::parse_legacy_window_command(
+                                                &raw, rd_id,
+                                            )
+                                        {
+                                            if let Ok(mut q) = win_queue.lock() {
+                                                q.push(cmd);
+                                            }
+                                            let _ = wake_proxy.send_event(());
+                                            return;
+                                        }
+
+                                        if let Ok(msg) = serde_json::from_value::<IpcMessage>(raw) {
+                                            if !ipc_envelope_is_bounded(&msg) {
+                                                return;
+                                            }
+                                            // Formal window command or regular IPC message.
+                                            if let Some(cmd) =
+                                                WebViewRenderer::parse_window_command(&msg, rd_id)
+                                            {
+                                                if let Ok(mut q) = win_queue.lock() {
+                                                    q.push(cmd);
+                                                }
+                                            } else {
+                                                let Some(permit) = try_acquire_ipc_worker(
+                                                    &in_flight,
+                                                    max_ipc_in_flight,
+                                                ) else {
+                                                    let response = IpcResponse {
+                                                        id: msg.id,
+                                                        success: false,
+                                                        data: serde_json::json!({
+                                                            "message": "IPC concurrency limit reached"
+                                                        }),
+                                                    };
+                                                    if let Ok(json) =
+                                                        serde_json::to_string(&response)
+                                                    {
+                                                        if let Ok(mut responses) = queue.lock() {
+                                                            responses.push((rd_id, json));
+                                                        }
+                                                    }
+                                                    let _ = wake_proxy.send_event(());
+                                                    return;
+                                                };
+                                                // Never run application RPC on the tao/WebView
+                                                // event-loop thread. A Git/network RPC may wait on
+                                                // credentials or a remote timeout; blocking here
+                                                // makes Windows label the entire app "Not responding".
+                                                let request_handler = handler.clone();
+                                                let response_queue = queue.clone();
+                                                let response_wake = wake_proxy.clone();
+                                                let response_sink: IpcResponseSender =
+                                                    Arc::new(move |response| {
+                                                        if let Ok(json) =
+                                                            serde_json::to_string(&response)
+                                                        {
+                                                            if let Ok(mut q) = response_queue.lock()
+                                                            {
+                                                                q.push((rd_id, json));
+                                                            }
+                                                        }
+                                                        let _ = response_wake.send_event(());
+                                                    });
+                                                let sequence = worker_sequence
+                                                    .fetch_add(1, Ordering::Relaxed);
+                                                let thread_name =
+                                                    format!("rdesktop-ipc-{rd_id}-{sequence}");
+                                                let response_id = msg.id.clone();
+                                                if let Err(error) = std::thread::Builder::new()
+                                                    .name(thread_name)
+                                                    .spawn(move || {
+                                                        let _permit = permit;
+                                                        request_handler
+                                                            .handle_from_window(rd_id, msg, response_sink)
+                                                    })
+                                                {
+                                                    tracing::warn!(
+                                                        window_id = rd_id,
+                                                        "could not start bounded IPC worker: {error}"
+                                                    );
+                                                    let response = IpcResponse {
+                                                        id: response_id,
+                                                        success: false,
+                                                        data: serde_json::json!({
+                                                            "message": "IPC worker could not start"
+                                                        }),
+                                                    };
+                                                    if let Ok(json) = serde_json::to_string(&response)
+                                                    {
+                                                        if let Ok(mut responses) = queue.lock() {
+                                                            responses.push((rd_id, json));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            let _ = wake_proxy.send_event(());
+                                        }
+                                    }
+                                });
+                        }
+
+                        if let Some((options, _)) = initial_content.get_mut(rdesktop_id) {
+                            if let Some(setup) = options.setup.take() { builder = setup(builder); }
+                        }
+                        let webview = match builder.build(&window) {
+                            Ok(wv) => wv,
+                            Err(e) => {
+                                tracing::error!("Failed to create webview {}: {}", rdesktop_id, e);
+                                if let Some((_, reply)) = initial_content.remove(rdesktop_id) { let _ = reply.send(Err(e.to_string())); }
+                                continue;
+                            }
+                        };
+
+                        #[cfg(target_os = "windows")]
+                        let resize_border = match crate::windows_frame::NativeResizeBorder::new(
+                            &window, window_config.min_size.is_some(), window_config.max_size.is_some()) {
+                            Ok(border) => Some(border),
+                            Err(error) => {
+                                tracing::warn!(%error, "Native resize border initialization failed");
+                                None
+                            }
+                        };
+                        windows.insert(tao_id, WindowEntry {
+                            window, webview, fullscreen_restore_maximized: Cell::new(false),
+                            #[cfg(target_os = "windows")]
+                            resize_border,
+                        });
+                        rdesktop_to_tao.insert(*rdesktop_id, tao_id);
+                        tao_to_rdesktop.insert(tao_id, *rdesktop_id);
+
+                        if first_window_id.lock().unwrap().is_none() {
+                            *first_window_id.lock().unwrap() = Some(*rdesktop_id);
+                        }
+
+                        tracing::info!(rdesktop_id = rdesktop_id, ?tao_id, "Window created");
+                        if let Some((_, reply)) = initial_content.remove(rdesktop_id) {
+                            if reply.send(Ok(*rdesktop_id)).is_err() {
+                                windows.remove(&tao_id);
+                                rdesktop_to_tao.remove(rdesktop_id);
+                                tao_to_rdesktop.remove(&tao_id);
+                            }
+                        }
+                    }
+
+
+            for request in deferred {
+                match request {
+                    crate::runtime::Request::Execute { id, task } => {
+                        let entry = rdesktop_to_tao.get(&id).and_then(|id| windows.get(id));
+                        task(entry.map(|entry| (&entry.window, &entry.webview)));
+                    }
+                    crate::runtime::Request::Close(id) => {
+                        if let Some(tao_id) = rdesktop_to_tao.remove(&id) {
+                            tao_to_rdesktop.remove(&tao_id);
+                            windows.remove(&tao_id);
+                            if let Some(handler) = &native_events { handler(id, crate::runtime::NativeEvent::Destroyed); }
+                        }
+                    }
+                    crate::runtime::Request::Exit => *control_flow = ControlFlow::Exit,
+                    crate::runtime::Request::Create { .. } => unreachable!(),
+                }
+            }
+            match event {
+                Event::NewEvents(StartCause::Init) => {
+                    // Process pending operations
+                    for op in &pending_ops {
+                        Self::apply_op(op, &windows, &rdesktop_to_tao, asset_root.is_some() || embedded_assets.is_some());
+                    }
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    window_id,
+                    ..
+                } => {
+                    if resident {
+                        if let (Some(handler), Some(id)) = (&native_events, tao_to_rdesktop.get(&window_id)) {
+                            handler(*id, crate::runtime::NativeEvent::CloseRequested);
+                            return;
+                        }
+                    }
+                    if let Some(rd_id) = tao_to_rdesktop.remove(&window_id) {
+                        rdesktop_to_tao.remove(&rd_id);
+                    }
+                    windows.remove(&window_id);
+                    if windows.is_empty() && !resident {
+                        tracing::info!("All windows closed, exiting");
+                        *control_flow = ControlFlow::Exit;
+                    }
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::Resized(size),
+                    window_id,
+                    ..
+                } => {
+                    if let Some(entry) = windows.get(&window_id) {
+                        tracing::debug!(inner = ?size, scale = entry.window.scale_factor(), minimized = entry.window.is_minimized(), "Native window resized");
+                        // tao reports Resized in physical pixels. Re-wrapping those
+                        // values as LogicalSize multiplies the WebView bounds by the
+                        // monitor scale factor (for example 1.5x at 150% DPI), which
+                        // clips bottom-docked UI outside the native client area.
+                        // Minimized Windows report icon dimensions. Resizing the
+                        // WebView to those dimensions can restore the parent and
+                        // violates the native minimize operation.
+                        if !entry.window.is_minimized() {
+                            let _ = entry
+                                .webview
+                                .set_bounds(physical_webview_bounds(size.width, size.height));
+                        }
+                        entry.publish_window_state();
+                    }
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::ScaleFactorChanged { new_inner_size, .. },
+                    window_id,
+                    ..
+                } => {
+                    if let Some(entry) = windows.get(&window_id) {
+                        let _ = entry.webview.set_bounds(physical_webview_bounds(
+                            new_inner_size.width,
+                            new_inner_size.height,
+                        ));
+                        entry.publish_window_state();
+                    }
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::Focused(focused),
+                    window_id,
+                    ..
+                } => {
+                    if let (Some(handler), Some(id)) = (&native_events, tao_to_rdesktop.get(&window_id)) {
+                        handler(*id, crate::runtime::NativeEvent::Focused(focused));
+                    }
+                    if let Some(entry) = windows.get(&window_id) {
+                        entry.publish_window_state();
+                    }
+                }
+
+                Event::MainEventsCleared => {
+                    // Drain IPC response queue
+                    let responses: Vec<(u64, String)> = {
+                        let mut queue = ipc_response_queue.lock().unwrap();
+                        queue.drain(..).collect()
+                    };
+                    for (rdesktop_id, json) in responses {
+                        if let Some(tao_id) = rdesktop_to_tao.get(&rdesktop_id) {
+                            if let Some(entry) = windows.get(tao_id) {
+                                if let Ok(js) = serde_json::to_string(&json) {
+                                    let script = format!("window.__RDESKTOP_IPC__({js})");
+                                    let _ = entry.webview.evaluate_script(&script);
+                                }
+                            }
+                        }
+                    }
+
+                    // Drain external outbox (native → frontend pushes)
+                    let outbox_msgs: Vec<String> = {
+                        let mut queue = outbox_for_loop.lock().unwrap();
+                        queue.drain(..).collect()
+                    };
+                    for json in outbox_msgs {
+                        if let Some(entry) = first_window_id.lock().unwrap().and_then(|id| rdesktop_to_tao.get(&id)).and_then(|id| windows.get(id)) {
+                            if let Ok(js) = serde_json::to_string(&json) {
+                                let script = format!("window.__RDESKTOP_IPC__({js})");
+                                let _ = entry.webview.evaluate_script(&script);
+                            }
+                        }
+                    }
+
+                    // Drain window command queue
+                    let commands: Vec<WindowCommand> = {
+                        let mut queue = window_cmd_queue.lock().unwrap();
+                        queue.drain(..).collect()
+                    };
+                    for cmd in commands {
+                        if matches!(cmd.action, WindowAction::Close) {
+                            if resident {
+                                if let Some(handler) = &native_events {
+                                    handler(cmd.rdesktop_id, crate::runtime::NativeEvent::CloseRequested);
+                                    continue;
+                                }
+                            }
+                            if let Some(tao_id) = rdesktop_to_tao.remove(&cmd.rdesktop_id) {
+                                tao_to_rdesktop.remove(&tao_id);
+                                windows.remove(&tao_id);
+                                if windows.is_empty() && !resident {
+                                    *control_flow = ControlFlow::Exit;
+                                }
+                            }
+                            continue;
+                        }
+                        if let Some(tao_id) = rdesktop_to_tao.get(&cmd.rdesktop_id) {
+                            if let Some(entry) = windows.get(tao_id) {
+                                match cmd.action {
+                                    WindowAction::Minimize => {
+                                        entry.window.set_minimized(true);
+                                    }
+                                    WindowAction::Maximize => {
+                                        let is_max = entry.window.is_maximized();
+                                        entry.window.set_maximized(!is_max);
+                                    }
+                                    WindowAction::Close => unreachable!("handled before borrowing the window"),
+                                    WindowAction::StartDrag => {
+                                        entry.start_drag(None);
+                                    }
+                                    WindowAction::StartResize(dir) => {
+                                        tracing::debug!(?dir, inner = ?entry.window.inner_size(), outer = ?entry.window.outer_size(), "Native window resize requested");
+                                        entry.start_drag(Some(dir));
+                                    }
+                                    WindowAction::SetFullscreen(fs) => {
+                                        entry.set_fullscreen(fs);
+                                    }
+                                    WindowAction::SetDecorations(decorations) => {
+                                        entry.set_decorations(decorations);
+                                    }
+                                    WindowAction::RequestState => {}
+                                }
+                                entry.publish_window_state();
+                            }
+                        }
+                    }
+                }
+
+                Event::LoopDestroyed => {
+                    native_runtime.shutdown();
+                    tracing::info!("WebView event loop destroyed");
+                }
+
+                _ => {}
+            }
+        });
+    }
+
+    fn kind(&self) -> RendererKind {
+        RendererKind::WebView
+    }
+}
+
+impl WebViewRenderer {
+    /// Apply a pending operation to a window.
+    fn apply_op(
+        op: &PendingOp,
+        windows: &HashMap<WindowId, WindowEntry>,
+        rdesktop_to_tao: &HashMap<u64, WindowId>,
+        has_assets: bool,
+    ) {
+        match op {
+            PendingOp::LoadUrl(rd_id, url) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let native_url = native_asset_url(url, has_assets);
+                    let _ = entry.webview.load_url(&native_url);
+                }
+            }
+            PendingOp::LoadHtml(rd_id, html) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let _ = entry.webview.load_html(html);
+                }
+            }
+            PendingOp::EvalScript(rd_id, script) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let _ = entry.webview.evaluate_script(script);
+                }
+            }
+            PendingOp::SetTitle(rd_id, title) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_title(title);
+                }
+            }
+            PendingOp::SetSize(rd_id, w, h) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry
+                        .window
+                        .set_inner_size(tao::dpi::LogicalSize::new(*w, *h));
+                }
+            }
+            PendingOp::SetResizable(rd_id, resizable) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_resizable(*resizable);
+                }
+            }
+            PendingOp::SetVisible(rd_id, visible) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_visible(*visible);
+                }
+            }
+            PendingOp::SendToFrontend(rd_id, msg) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    if let Ok(js) = serde_json::to_string(msg) {
+                        let script = format!("window.__RDESKTOP_IPC__({js})");
+                        let _ = entry.webview.evaluate_script(&script);
+                    }
+                }
+            }
+            PendingOp::Close(_rd_id) => {
+                // Handled by the caller (removes from maps)
+            }
+            PendingOp::Minimize(rd_id) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_minimized(true);
+                }
+            }
+            PendingOp::Maximize(rd_id) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    let is_max = entry.window.is_maximized();
+                    entry.window.set_maximized(!is_max);
+                }
+            }
+            PendingOp::SetFullscreen(rd_id, fs) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.set_fullscreen(*fs);
+                }
+            }
+            PendingOp::StartDrag(rd_id) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.start_drag(None);
+                }
+            }
+            PendingOp::StartResize(rd_id, dir) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.start_drag(Some(*dir));
+                }
+            }
+            PendingOp::SetDecorations(rd_id, decorations) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.set_decorations(*decorations);
+                }
+            }
+            PendingOp::SetAlwaysOnTop(rd_id, always) => {
+                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
+                    entry.window.set_always_on_top(*always);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_assets_are_immutable_and_resolve_only_exact_safe_paths() {
+        let assets = HashMap::from([
+            ("index.html".to_owned(), b"<html>app</html>".as_slice()),
+            ("assets/main.js".to_owned(), b"app()".as_slice()),
+        ]);
+        for (url, status, mime) in [
+            (
+                "http://rdesktop.localhost/",
+                200,
+                "text/html; charset=utf-8",
+            ),
+            (
+                "http://rdesktop.localhost/assets/main.js?version=1",
+                200,
+                "text/javascript; charset=utf-8",
+            ),
+            (
+                "http://rdesktop.localhost/%2e%2e/private",
+                403,
+                "text/plain; charset=utf-8",
+            ),
+            (
+                "http://rdesktop.localhost/assets%5cmain.js",
+                403,
+                "text/plain; charset=utf-8",
+            ),
+            (
+                "http://rdesktop.localhost/missing.html",
+                404,
+                "text/plain; charset=utf-8",
+            ),
+        ] {
+            let response = serve_embedded_asset(
+                &assets,
+                Request::builder().uri(url).body(Vec::new()).unwrap(),
+            );
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()["Content-Type"], mime);
+        }
+    }
+
+    #[test]
+    fn file_drop_retains_the_native_target_window() {
+        let queue = Arc::new(Mutex::new(Vec::new()));
+        assert!(enqueue_file_drop(&queue, 17, DragDropEvent::Leave));
+        let queue = queue.lock().unwrap();
+        assert_eq!(queue[0].0, 17);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&queue[0].1).unwrap()["payload"]["phase"],
+            "leave"
+        );
+    }
 
     #[test]
     fn window_state_request_keeps_the_originating_window() {
@@ -908,749 +1870,5 @@ mod tests {
     #[test]
     fn ignores_high_frequency_file_drag_over_messages() {
         assert!(file_drop_message(DragDropEvent::Over { position: (1, 2) }).is_none());
-    }
-}
-
-impl Renderer for WebViewRenderer {
-    fn init(&mut self) -> Result<()> {
-        tracing::info!("Initializing WebView renderer");
-        Ok(())
-    }
-
-    fn create_window(&mut self, config: &WindowConfig) -> Result<WindowHandle> {
-        let id = self.next_id();
-        self.pending_windows.borrow_mut().push((id, config.clone()));
-        tracing::info!(window_id = id, "Window queued for creation");
-        Ok(WindowHandle::new(id))
-    }
-
-    fn load_url(&self, window: WindowHandle, url: &str) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::LoadUrl(window.id(), url.to_string()));
-        Ok(())
-    }
-
-    fn load_html(&self, window: WindowHandle, html: &str) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::LoadHtml(window.id(), html.to_string()));
-        Ok(())
-    }
-
-    fn eval_script(&self, window: WindowHandle, script: &str) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::EvalScript(window.id(), script.to_string()));
-        Ok(())
-    }
-
-    fn set_ipc_handler(&mut self, handler: Box<dyn IpcHandler>) {
-        self.ipc_handler = Some(Arc::from(handler));
-    }
-
-    fn send_to_frontend(&self, window: WindowHandle, message: &str) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::SendToFrontend(window.id(), message.to_string()));
-        Ok(())
-    }
-
-    fn set_title(&self, window: WindowHandle, title: &str) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::SetTitle(window.id(), title.to_string()));
-        Ok(())
-    }
-
-    fn set_size(&self, window: WindowHandle, width: u32, height: u32) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::SetSize(window.id(), width, height));
-        Ok(())
-    }
-
-    fn set_resizable(&self, window: WindowHandle, resizable: bool) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::SetResizable(window.id(), resizable));
-        Ok(())
-    }
-
-    fn set_visible(&self, window: WindowHandle, visible: bool) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::SetVisible(window.id(), visible));
-        Ok(())
-    }
-
-    fn close_window(&mut self, window: WindowHandle) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::Close(window.id()));
-        Ok(())
-    }
-
-    // ── Frameless / Window Controls ─────────────────────────────
-
-    fn minimize_window(&self, window: WindowHandle) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::Minimize(window.id()));
-        Ok(())
-    }
-
-    fn maximize_window(&self, window: WindowHandle) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::Maximize(window.id()));
-        Ok(())
-    }
-
-    fn is_maximized(&self, _window: WindowHandle) -> Result<bool> {
-        // This needs to be checked inside the event loop; return false for now.
-        // In practice, the frontend can track this via window state events.
-        Ok(false)
-    }
-
-    fn set_fullscreen(&self, window: WindowHandle, fullscreen: bool) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::SetFullscreen(window.id(), fullscreen));
-        Ok(())
-    }
-
-    fn is_fullscreen(&self, _window: WindowHandle) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn start_drag(&self, window: WindowHandle) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::StartDrag(window.id()));
-        Ok(())
-    }
-
-    fn start_resize(&self, window: WindowHandle, edge: ResizeEdge) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::StartResize(window.id(), to_tao_resize(edge)));
-        Ok(())
-    }
-
-    fn set_decorations(&self, window: WindowHandle, decorations: bool) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::SetDecorations(window.id(), decorations));
-        Ok(())
-    }
-
-    fn set_always_on_top(&self, window: WindowHandle, always: bool) -> Result<()> {
-        self.pending_ops
-            .borrow_mut()
-            .push(PendingOp::SetAlwaysOnTop(window.id(), always));
-        Ok(())
-    }
-
-    // ── Event Loop ──────────────────────────────────────────────
-
-    fn run(mut self: Box<Self>) -> Result<()> {
-        tracing::info!("Starting WebView event loop");
-
-        let ipc_handler = self.ipc_handler.take();
-        let webgpu_enabled = self._config.renderer.webgpu;
-        let restrict_origins = !self._config.renderer.trusted_origins.is_empty();
-        let trusted_origins = canonical_trusted_origins(&self._config.renderer.trusted_origins);
-        if restrict_origins && trusted_origins.is_empty() {
-            tracing::warn!(
-                "renderer origin restrictions are enabled, but no configured origin is valid"
-            );
-        }
-        let max_ipc_message_bytes = self
-            ._config
-            .renderer
-            .max_ipc_message_bytes
-            .clamp(1, HARD_MAX_IPC_MESSAGE_BYTES);
-        let max_ipc_in_flight = self
-            ._config
-            .renderer
-            .max_ipc_in_flight
-            .clamp(1, HARD_MAX_IPC_IN_FLIGHT);
-        let ipc_in_flight = Arc::new(AtomicUsize::new(0));
-        let ipc_worker_sequence = Arc::new(AtomicU64::new(1));
-        let asset_root = self.asset_root.clone();
-        let data_directory = self.data_directory.clone();
-        let pending_windows: Vec<(u64, WindowConfig)> =
-            self.pending_windows.borrow_mut().drain(..).collect();
-        let pending_ops: Vec<PendingOp> = self.pending_ops.borrow_mut().drain(..).collect();
-
-        let ipc_response_queue: IpcResponseQueue = Arc::new(Mutex::new(Vec::new()));
-        let ipc_queue_for_handler = ipc_response_queue.clone();
-
-        // External outbox for native → frontend pushes (Node extension host, etc.)
-        let outbox_for_loop = self.outbox.clone();
-
-        // ── Phase 2: global hotkeys & input hooks ───────────────────────
-        // Wired through the shared outbox so the frontend receives them as
-        // `window.__RDESKTOP_PUSH__` events (`rdesktop.globalHotkey` /
-        // `rdesktop.globalInput`). Managers live for the whole event loop.
-        let global_handler = rdesktop_core::PushHandler::new(self.outbox.clone());
-        let _hotkey_manager = {
-            let mgr = rdesktop_core::HotkeyManager::new(global_handler.clone());
-            for (i, hc) in self._config.hotkeys.iter().enumerate() {
-                if let Ok(hk) = hc.combo.parse::<rdesktop_core::Hotkey>() {
-                    let id = i as u32 + 1;
-                    if let Err(e) = mgr.register(id, &hk) {
-                        tracing::warn!("failed to register hotkey {:?}: {}", hc.combo, e);
-                    }
-                } else {
-                    tracing::warn!("invalid hotkey combo: {:?}", hc.combo);
-                }
-            }
-            mgr
-        };
-        let _input_manager = if self._config.global_input.enabled {
-            let mut inp = rdesktop_core::GlobalInput::new(global_handler.clone());
-            if self._config.global_input.mouse_move {
-                inp = inp.with_mouse_move(true);
-            }
-            match inp.start() {
-                Ok(()) => Some(inp),
-                Err(e) => {
-                    tracing::warn!("failed to start global input: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Window command queue for IPC-triggered window operations
-        let window_cmd_queue: WindowCommandQueue = Arc::new(Mutex::new(Vec::new()));
-        let window_cmd_queue_for_ipc = window_cmd_queue.clone();
-
-        // Build a map of rdesktop_id -> first tao_id for the IPC handler
-        // (the IPC handler needs to know which window to operate on)
-        let first_window_id: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
-
-        let event_loop = EventLoopBuilder::new().build();
-        let event_loop_proxy = event_loop.create_proxy();
-        let mut windows: HashMap<WindowId, WindowEntry> = HashMap::new();
-        let mut rdesktop_to_tao: HashMap<u64, WindowId> = HashMap::new();
-        let mut tao_to_rdesktop: HashMap<WindowId, u64> = HashMap::new();
-        // Keep the context alive for the entire event loop. On Windows this
-        // binds WebView2 storage to the caller-selected per-user directory,
-        // instead of the replaceable executable directory.
-        let mut web_context = data_directory.map(|path| WebContext::new(Some(path)));
-
-        event_loop.run(move |event, event_loop_target, control_flow| {
-            *control_flow = ControlFlow::Wait;
-
-            match event {
-                Event::NewEvents(StartCause::Init) => {
-                    let event_loop_proxy = event_loop_proxy.clone();
-                    // Create all pending windows
-                    for (rdesktop_id, window_config) in &pending_windows {
-                        let mut window_builder = WindowBuilder::new()
-                            .with_title(&window_config.title)
-                            .with_inner_size(tao::dpi::LogicalSize::new(
-                                window_config.width,
-                                window_config.height,
-                            ))
-                            .with_resizable(window_config.resizable)
-                            .with_decorations(window_config.decorations)
-                            .with_transparent(window_config.transparent)
-                            .with_always_on_top(window_config.always_on_top)
-                            .with_window_icon(rdesktop_core::window_icon(window_config));
-                        if let Some((width, height)) = window_config.min_size {
-                            window_builder = window_builder
-                                .with_min_inner_size(tao::dpi::LogicalSize::new(width, height));
-                        }
-                        if let Some((width, height)) = window_config.max_size {
-                            window_builder = window_builder
-                                .with_max_inner_size(tao::dpi::LogicalSize::new(width, height));
-                        }
-                        let window = match window_builder.build(event_loop_target) {
-                            Ok(w) => w,
-                            Err(e) => {
-                                tracing::error!("Failed to create window {}: {}", rdesktop_id, e);
-                                continue;
-                            }
-                        };
-
-                        let tao_id = window.id();
-
-                        // Realize wallpaper/overlay/click-through window attributes.
-                        rdesktop_core::apply_window_attributes(&window, window_config);
-
-                        let mut builder = if let Some(context) = web_context.as_mut() {
-                            WebViewBuilder::new_with_web_context(context)
-                        } else {
-                            WebViewBuilder::new()
-                        }
-                        .with_url("about:blank")
-                        .with_devtools(cfg!(debug_assertions))
-                        .with_initialization_script(Self::bridge_script());
-
-                        if restrict_origins {
-                            let navigation_origins = trusted_origins.clone();
-                            builder = builder
-                                .with_navigation_handler(move |url| {
-                                    is_trusted_navigation(
-                                        &url,
-                                        &navigation_origins,
-                                        restrict_origins,
-                                    )
-                                })
-                                .with_new_window_req_handler(|_, _| NewWindowResponse::Deny);
-                        }
-
-                        let file_drop_outbox = outbox_for_loop.clone();
-                        builder = builder.with_drag_drop_handler(move |event| {
-                            enqueue_file_drop(&file_drop_outbox, event)
-                        });
-
-                        if let Some(root) = asset_root.clone() {
-                            builder = builder.with_custom_protocol(
-                                "rdesktop".to_string(),
-                                move |_webview_id, request| serve_asset(&root, request),
-                            );
-                        }
-
-                        // Enable WebGPU in the web context when requested, so the
-                        // frontend can drive native shaders (wallpaper effects).
-                        if window_config.transparent {
-                            builder = builder.with_transparent(true);
-                        }
-                        // Enable WebGPU in the web context so the frontend can
-                        // drive native shaders (wallpaper effects). On Windows
-                        // WebView2/Edge needs the feature flag; on macOS WKWebView
-                        // exposes WebGPU natively and on Linux WebKitGTK enables it
-                        // via a different path, so the args are Windows-only.
-                        #[cfg(target_os = "windows")]
-                        if webgpu_enabled {
-                            builder = builder.with_additional_browser_args(
-                                "--enable-features=Vulkan,WebGPU --enable-unsafe-webgpu",
-                            );
-                        }
-
-                        // Wire up IPC handler
-                        if let Some(ref handler) = ipc_handler {
-                            let handler = handler.clone();
-                            let queue = ipc_queue_for_handler.clone();
-                            let win_queue = window_cmd_queue_for_ipc.clone();
-                            let wake_proxy = event_loop_proxy.clone();
-                            let _first_id = first_window_id.clone();
-                            let allowed_origins = trusted_origins.clone();
-                            let in_flight = Arc::clone(&ipc_in_flight);
-                            let worker_sequence = Arc::clone(&ipc_worker_sequence);
-                            let rd_id = *rdesktop_id;
-
-                            builder =
-                                builder.with_ipc_handler(move |req: wry::http::Request<String>| {
-                                    if !is_trusted_ipc_request(
-                                        req.uri(),
-                                        &allowed_origins,
-                                        restrict_origins,
-                                    ) {
-                                        return;
-                                    }
-                                    let body = req.body();
-
-                                    // Parse the JSON once so both the formal IPC envelope and
-                                    // legacy top-level window commands remain supported.
-                                    if let Some(raw) =
-                                        parse_bounded_ipc_message(body, max_ipc_message_bytes)
-                                    {
-                                        if let Some(cmd) =
-                                            WebViewRenderer::parse_legacy_window_command(
-                                                &raw, rd_id,
-                                            )
-                                        {
-                                            if let Ok(mut q) = win_queue.lock() {
-                                                q.push(cmd);
-                                            }
-                                            let _ = wake_proxy.send_event(());
-                                            return;
-                                        }
-
-                                        if let Ok(msg) = serde_json::from_value::<IpcMessage>(raw) {
-                                            if !ipc_envelope_is_bounded(&msg) {
-                                                return;
-                                            }
-                                            // Formal window command or regular IPC message.
-                                            if let Some(cmd) =
-                                                WebViewRenderer::parse_window_command(&msg, rd_id)
-                                            {
-                                                if let Ok(mut q) = win_queue.lock() {
-                                                    q.push(cmd);
-                                                }
-                                            } else {
-                                                let Some(permit) = try_acquire_ipc_worker(
-                                                    &in_flight,
-                                                    max_ipc_in_flight,
-                                                ) else {
-                                                    let response = IpcResponse {
-                                                        id: msg.id,
-                                                        success: false,
-                                                        data: serde_json::json!({
-                                                            "message": "IPC concurrency limit reached"
-                                                        }),
-                                                    };
-                                                    if let Ok(json) =
-                                                        serde_json::to_string(&response)
-                                                    {
-                                                        if let Ok(mut responses) = queue.lock() {
-                                                            responses.push((rd_id, json));
-                                                        }
-                                                    }
-                                                    let _ = wake_proxy.send_event(());
-                                                    return;
-                                                };
-                                                // Never run application RPC on the tao/WebView
-                                                // event-loop thread. A Git/network RPC may wait on
-                                                // credentials or a remote timeout; blocking here
-                                                // makes Windows label the entire app "Not responding".
-                                                let request_handler = handler.clone();
-                                                let response_queue = queue.clone();
-                                                let response_wake = wake_proxy.clone();
-                                                let response_sink: IpcResponseSender =
-                                                    Arc::new(move |response| {
-                                                        if let Ok(json) =
-                                                            serde_json::to_string(&response)
-                                                        {
-                                                            if let Ok(mut q) = response_queue.lock()
-                                                            {
-                                                                q.push((rd_id, json));
-                                                            }
-                                                        }
-                                                        let _ = response_wake.send_event(());
-                                                    });
-                                                let sequence = worker_sequence
-                                                    .fetch_add(1, Ordering::Relaxed);
-                                                let thread_name =
-                                                    format!("rdesktop-ipc-{rd_id}-{sequence}");
-                                                let response_id = msg.id.clone();
-                                                if let Err(error) = std::thread::Builder::new()
-                                                    .name(thread_name)
-                                                    .spawn(move || {
-                                                        let _permit = permit;
-                                                        request_handler
-                                                            .handle_async(msg, response_sink)
-                                                    })
-                                                {
-                                                    tracing::warn!(
-                                                        window_id = rd_id,
-                                                        "could not start bounded IPC worker: {error}"
-                                                    );
-                                                    let response = IpcResponse {
-                                                        id: response_id,
-                                                        success: false,
-                                                        data: serde_json::json!({
-                                                            "message": "IPC worker could not start"
-                                                        }),
-                                                    };
-                                                    if let Ok(json) = serde_json::to_string(&response)
-                                                    {
-                                                        if let Ok(mut responses) = queue.lock() {
-                                                            responses.push((rd_id, json));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            let _ = wake_proxy.send_event(());
-                                        }
-                                    }
-                                });
-                        }
-
-                        let webview = match builder.build(&window) {
-                            Ok(wv) => wv,
-                            Err(e) => {
-                                tracing::error!("Failed to create webview {}: {}", rdesktop_id, e);
-                                continue;
-                            }
-                        };
-
-                        #[cfg(target_os = "windows")]
-                        let resize_border = match crate::windows_frame::NativeResizeBorder::new(
-                            &window, window_config.min_size.is_some(), window_config.max_size.is_some()) {
-                            Ok(border) => Some(border),
-                            Err(error) => {
-                                tracing::warn!(%error, "Native resize border initialization failed");
-                                None
-                            }
-                        };
-                        windows.insert(tao_id, WindowEntry {
-                            window, webview, fullscreen_restore_maximized: Cell::new(false),
-                            #[cfg(target_os = "windows")]
-                            resize_border,
-                        });
-                        rdesktop_to_tao.insert(*rdesktop_id, tao_id);
-                        tao_to_rdesktop.insert(tao_id, *rdesktop_id);
-
-                        if first_window_id.lock().unwrap().is_none() {
-                            *first_window_id.lock().unwrap() = Some(*rdesktop_id);
-                        }
-
-                        tracing::info!(rdesktop_id = rdesktop_id, ?tao_id, "Window created");
-                    }
-
-                    // Process pending operations
-                    for op in &pending_ops {
-                        Self::apply_op(op, &windows, &rdesktop_to_tao, asset_root.as_deref());
-                    }
-                }
-
-                Event::WindowEvent {
-                    event: WindowEvent::CloseRequested,
-                    window_id,
-                    ..
-                } => {
-                    if let Some(rd_id) = tao_to_rdesktop.remove(&window_id) {
-                        rdesktop_to_tao.remove(&rd_id);
-                    }
-                    windows.remove(&window_id);
-                    if windows.is_empty() {
-                        tracing::info!("All windows closed, exiting");
-                        *control_flow = ControlFlow::Exit;
-                    }
-                }
-
-                Event::WindowEvent {
-                    event: WindowEvent::Resized(size),
-                    window_id,
-                    ..
-                } => {
-                    if let Some(entry) = windows.get(&window_id) {
-                        tracing::debug!(inner = ?size, scale = entry.window.scale_factor(), minimized = entry.window.is_minimized(), "Native window resized");
-                        // tao reports Resized in physical pixels. Re-wrapping those
-                        // values as LogicalSize multiplies the WebView bounds by the
-                        // monitor scale factor (for example 1.5x at 150% DPI), which
-                        // clips bottom-docked UI outside the native client area.
-                        // Minimized Windows report icon dimensions. Resizing the
-                        // WebView to those dimensions can restore the parent and
-                        // violates the native minimize operation.
-                        if !entry.window.is_minimized() {
-                            let _ = entry
-                                .webview
-                                .set_bounds(physical_webview_bounds(size.width, size.height));
-                        }
-                        entry.publish_window_state();
-                    }
-                }
-
-                Event::WindowEvent {
-                    event: WindowEvent::ScaleFactorChanged { new_inner_size, .. },
-                    window_id,
-                    ..
-                } => {
-                    if let Some(entry) = windows.get(&window_id) {
-                        let _ = entry.webview.set_bounds(physical_webview_bounds(
-                            new_inner_size.width,
-                            new_inner_size.height,
-                        ));
-                        entry.publish_window_state();
-                    }
-                }
-
-                Event::WindowEvent {
-                    event: WindowEvent::Focused(_),
-                    window_id,
-                    ..
-                } => {
-                    if let Some(entry) = windows.get(&window_id) {
-                        entry.publish_window_state();
-                    }
-                }
-
-                Event::MainEventsCleared => {
-                    // Drain IPC response queue
-                    let responses: Vec<(u64, String)> = {
-                        let mut queue = ipc_response_queue.lock().unwrap();
-                        queue.drain(..).collect()
-                    };
-                    for (rdesktop_id, json) in responses {
-                        if let Some(tao_id) = rdesktop_to_tao.get(&rdesktop_id) {
-                            if let Some(entry) = windows.get(tao_id) {
-                                if let Ok(js) = serde_json::to_string(&json) {
-                                    let script = format!("window.__RDESKTOP_IPC__({js})");
-                                    let _ = entry.webview.evaluate_script(&script);
-                                }
-                            }
-                        }
-                    }
-
-                    // Drain external outbox (native → frontend pushes)
-                    let outbox_msgs: Vec<String> = {
-                        let mut queue = outbox_for_loop.lock().unwrap();
-                        queue.drain(..).collect()
-                    };
-                    for json in outbox_msgs {
-                        if let Some(entry) = windows.values().next() {
-                            if let Ok(js) = serde_json::to_string(&json) {
-                                let script = format!("window.__RDESKTOP_IPC__({js})");
-                                let _ = entry.webview.evaluate_script(&script);
-                            }
-                        }
-                    }
-
-                    // Drain window command queue
-                    let commands: Vec<WindowCommand> = {
-                        let mut queue = window_cmd_queue.lock().unwrap();
-                        queue.drain(..).collect()
-                    };
-                    for cmd in commands {
-                        if matches!(cmd.action, WindowAction::Close) {
-                            if let Some(tao_id) = rdesktop_to_tao.remove(&cmd.rdesktop_id) {
-                                tao_to_rdesktop.remove(&tao_id);
-                                windows.remove(&tao_id);
-                                if windows.is_empty() {
-                                    *control_flow = ControlFlow::Exit;
-                                }
-                            }
-                            continue;
-                        }
-                        if let Some(tao_id) = rdesktop_to_tao.get(&cmd.rdesktop_id) {
-                            if let Some(entry) = windows.get(tao_id) {
-                                match cmd.action {
-                                    WindowAction::Minimize => {
-                                        entry.window.set_minimized(true);
-                                    }
-                                    WindowAction::Maximize => {
-                                        let is_max = entry.window.is_maximized();
-                                        entry.window.set_maximized(!is_max);
-                                    }
-                                    WindowAction::Close => unreachable!("handled before borrowing the window"),
-                                    WindowAction::StartDrag => {
-                                        entry.start_drag(None);
-                                    }
-                                    WindowAction::StartResize(dir) => {
-                                        tracing::debug!(?dir, inner = ?entry.window.inner_size(), outer = ?entry.window.outer_size(), "Native window resize requested");
-                                        entry.start_drag(Some(dir));
-                                    }
-                                    WindowAction::SetFullscreen(fs) => {
-                                        entry.set_fullscreen(fs);
-                                    }
-                                    WindowAction::SetDecorations(decorations) => {
-                                        entry.set_decorations(decorations);
-                                    }
-                                    WindowAction::RequestState => {}
-                                }
-                                entry.publish_window_state();
-                            }
-                        }
-                    }
-                }
-
-                Event::LoopDestroyed => {
-                    tracing::info!("WebView event loop destroyed");
-                }
-
-                _ => {}
-            }
-        });
-    }
-
-    fn kind(&self) -> RendererKind {
-        RendererKind::WebView
-    }
-}
-
-impl WebViewRenderer {
-    /// Apply a pending operation to a window.
-    fn apply_op(
-        op: &PendingOp,
-        windows: &HashMap<WindowId, WindowEntry>,
-        rdesktop_to_tao: &HashMap<u64, WindowId>,
-        asset_root: Option<&Path>,
-    ) {
-        match op {
-            PendingOp::LoadUrl(rd_id, url) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    let native_url = native_asset_url(url, asset_root.is_some());
-                    let _ = entry.webview.load_url(&native_url);
-                }
-            }
-            PendingOp::LoadHtml(rd_id, html) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    let _ = entry.webview.load_html(html);
-                }
-            }
-            PendingOp::EvalScript(rd_id, script) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    let _ = entry.webview.evaluate_script(script);
-                }
-            }
-            PendingOp::SetTitle(rd_id, title) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry.window.set_title(title);
-                }
-            }
-            PendingOp::SetSize(rd_id, w, h) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry
-                        .window
-                        .set_inner_size(tao::dpi::LogicalSize::new(*w, *h));
-                }
-            }
-            PendingOp::SetResizable(rd_id, resizable) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry.window.set_resizable(*resizable);
-                }
-            }
-            PendingOp::SetVisible(rd_id, visible) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry.window.set_visible(*visible);
-                }
-            }
-            PendingOp::SendToFrontend(rd_id, msg) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    if let Ok(js) = serde_json::to_string(msg) {
-                        let script = format!("window.__RDESKTOP_IPC__({js})");
-                        let _ = entry.webview.evaluate_script(&script);
-                    }
-                }
-            }
-            PendingOp::Close(_rd_id) => {
-                // Handled by the caller (removes from maps)
-            }
-            PendingOp::Minimize(rd_id) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry.window.set_minimized(true);
-                }
-            }
-            PendingOp::Maximize(rd_id) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    let is_max = entry.window.is_maximized();
-                    entry.window.set_maximized(!is_max);
-                }
-            }
-            PendingOp::SetFullscreen(rd_id, fs) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry.set_fullscreen(*fs);
-                }
-            }
-            PendingOp::StartDrag(rd_id) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry.start_drag(None);
-                }
-            }
-            PendingOp::StartResize(rd_id, dir) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry.start_drag(Some(*dir));
-                }
-            }
-            PendingOp::SetDecorations(rd_id, decorations) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry.set_decorations(*decorations);
-                }
-            }
-            PendingOp::SetAlwaysOnTop(rd_id, always) => {
-                if let Some(entry) = rdesktop_to_tao.get(rd_id).and_then(|id| windows.get(id)) {
-                    entry.window.set_always_on_top(*always);
-                }
-            }
-        }
     }
 }

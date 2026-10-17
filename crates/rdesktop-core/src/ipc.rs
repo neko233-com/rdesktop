@@ -48,6 +48,12 @@ pub trait IpcHandler: Send + Sync {
     fn handle_async(&self, message: IpcMessage, respond: IpcResponseSender) {
         respond(self.handle(message));
     }
+
+    /// Native renderers supply the calling window identity out of band. Never
+    /// derive authorization from a label supplied in frontend JSON.
+    fn handle_from_window(&self, _window_id: u64, message: IpcMessage, respond: IpcResponseSender) {
+        self.handle_async(message, respond);
+    }
 }
 
 /// A function-based IPC handler.

@@ -4,6 +4,10 @@
 //! This is the default lightweight renderer.
 
 pub mod renderer;
+pub mod runtime;
+pub use runtime::{NativeEvent, NativeEventHandler, NativeRuntime};
+pub use runtime::{NativeWindowOptions, WebViewSetup};
+pub use {tao, wry};
 #[cfg(target_os = "windows")]
 mod windows_drag;
 #[cfg(target_os = "windows")]

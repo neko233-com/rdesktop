@@ -9,11 +9,14 @@ use super::hotkeys::{Hotkey, HotkeyHandler, Key, Modifiers};
 use crate::error::{RdesktopError, Result};
 use std::collections::HashMap;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
+use std::time::Duration;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, PostQuitMessage, TranslateMessage, MSG, WM_HOTKEY,
+    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_HOTKEY,
 };
 
 // Virtual-key codes (integer literals; windows-sys 0.52 types VK_* as the
@@ -46,8 +49,12 @@ pub struct WinHotkey {
 }
 
 enum Cmd {
-    Register(u32, Hotkey),
-    Unregister(u32),
+    Register(
+        u32,
+        Hotkey,
+        mpsc::SyncSender<std::result::Result<(), String>>,
+    ),
+    Unregister(u32, mpsc::SyncSender<std::result::Result<(), String>>),
     Stop,
 }
 
@@ -95,80 +102,158 @@ pub fn mods_to_raw(m: Modifiers) -> u32 {
 impl WinHotkey {
     pub fn start(handler: Arc<dyn HotkeyHandler>) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<Cmd>();
-        let registry: Arc<Mutex<HashMap<u32, Hotkey>>> = Arc::new(Mutex::new(HashMap::new()));
-        let registry_th = registry.clone();
-
-        let thread = thread::spawn(move || {
-            let registry = registry_th;
-            loop {
-                // Drain any pending registration commands without blocking.
-                while let Ok(cmd) = rx.try_recv() {
-                    match cmd {
-                        Cmd::Register(id, hk) => {
-                            let vk = key_to_vk(hk.key);
-                            let mods = mods_to_raw(hk.modifiers);
-                            unsafe {
-                                RegisterHotKey(0, id as i32, mods, vk);
-                            }
-                            registry.lock().unwrap().insert(id, hk);
+        let thread = thread::Builder::new()
+            .name("rdesktop-hotkeys".into())
+            .spawn(move || {
+                let mut registry = HashMap::<u32, Hotkey>::new();
+                let mut pressed = HashMap::<u32, Hotkey>::new();
+                loop {
+                    // A bounded receive keeps registration, release detection, and
+                    // shutdown responsive even when Windows has no messages.
+                    let command = match rx.recv_timeout(Duration::from_millis(8)) {
+                        Ok(command) => Some(command),
+                        Err(mpsc::RecvTimeoutError::Timeout) => None,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => Some(Cmd::Stop),
+                    };
+                    match command {
+                        Some(Cmd::Register(id, hk, reply)) => {
+                            let valid = (1..=0xBFFF).contains(&id);
+                            let registered = valid
+                                && unsafe {
+                                    RegisterHotKey(
+                                        0,
+                                        id as i32,
+                                        mods_to_raw(hk.modifiers) | 0x4000,
+                                        key_to_vk(hk.key),
+                                    )
+                                } != 0;
+                            let result = if registered {
+                                registry.insert(id, hk);
+                                Ok(())
+                            } else {
+                                Err(format!(
+                                    "Could not register hotkey {}: {}",
+                                    hk,
+                                    std::io::Error::last_os_error()
+                                ))
+                            };
+                            let _ = reply.send(result);
                         }
-                        Cmd::Unregister(id) => {
-                            unsafe {
-                                UnregisterHotKey(0, id as i32);
-                            }
-                            registry.lock().unwrap().remove(&id);
+                        Some(Cmd::Unregister(id, reply)) => {
+                            let result = if registry.contains_key(&id) {
+                                if unsafe { UnregisterHotKey(0, id as i32) } != 0 {
+                                    registry.remove(&id);
+                                    pressed.remove(&id);
+                                    Ok(())
+                                } else {
+                                    Err(std::io::Error::last_os_error().to_string())
+                                }
+                            } else {
+                                Ok(())
+                            };
+                            let _ = reply.send(result);
                         }
-                        Cmd::Stop => {
-                            unsafe {
-                                PostQuitMessage(0);
+                        Some(Cmd::Stop) => {
+                            for id in registry.keys() {
+                                unsafe {
+                                    UnregisterHotKey(0, *id as i32);
+                                }
                             }
                             break;
                         }
+                        None => {}
                     }
-                }
-
-                let mut msg = unsafe { std::mem::zeroed::<MSG>() };
-                // SAFETY: standard Windows message pump; `msg` is a valid out-param.
-                let res = unsafe { GetMessageW(&mut msg, 0, 0, 0) };
-                if res == 0 || res == -1 {
-                    break; // WM_QUIT or error
-                }
-                if msg.message == WM_HOTKEY {
-                    let id = msg.wParam as u32;
-                    let hk = registry.lock().unwrap().get(&id).copied();
-                    if let Some(hk) = hk {
-                        handler.on_hotkey(id, &hk);
+                    let mut msg = unsafe { std::mem::zeroed::<MSG>() };
+                    while unsafe { PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) } != 0 {
+                        if msg.message == WM_HOTKEY {
+                            let id = msg.wParam as u32;
+                            if let Some(hk) = registry.get(&id).copied() {
+                                if pressed.insert(id, hk).is_none() {
+                                    handler.on_hotkey(id, &hk);
+                                }
+                            }
+                        }
+                        unsafe {
+                            TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
                     }
+                    pressed.retain(|id, hk| {
+                        let down = |vk| unsafe { GetAsyncKeyState(vk) } < 0;
+                        let held = down(key_to_vk(hk.key) as i32)
+                            && (!hk.modifiers.ctrl || down(0x11))
+                            && (!hk.modifiers.alt || down(0x12))
+                            && (!hk.modifiers.shift || down(0x10))
+                            && (!hk.modifiers.meta || down(0x5b) || down(0x5c));
+                        if !held {
+                            handler.on_hotkey_released(*id, hk);
+                        }
+                        held
+                    });
                 }
-                unsafe {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            }
-        });
-
+            })
+            .map_err(|e| RdesktopError::GlobalInput(e.to_string()))?;
         Ok(Self {
             tx,
             thread: Some(thread),
         })
     }
-
     pub fn register(&self, id: u32, hotkey: &Hotkey) -> Result<()> {
+        let (reply, receive) = mpsc::sync_channel(1);
         self.tx
-            .send(Cmd::Register(id, *hotkey))
-            .map_err(|e| RdesktopError::GlobalInput(format!("hotkey channel: {e}")))
+            .send(Cmd::Register(id, *hotkey, reply))
+            .map_err(|e| RdesktopError::GlobalInput(e.to_string()))?;
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|e| RdesktopError::GlobalInput(e.to_string()))?
+            .map_err(RdesktopError::GlobalInput)
     }
-
     pub fn unregister(&self, id: u32) -> Result<()> {
+        let (reply, receive) = mpsc::sync_channel(1);
         self.tx
-            .send(Cmd::Unregister(id))
-            .map_err(|e| RdesktopError::GlobalInput(format!("hotkey channel: {e}")))
+            .send(Cmd::Unregister(id, reply))
+            .map_err(|e| RdesktopError::GlobalInput(e.to_string()))?;
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|e| RdesktopError::GlobalInput(e.to_string()))?
+            .map_err(RdesktopError::GlobalInput)
     }
-
     pub fn stop(mut self) {
         let _ = self.tx.send(Cmd::Stop);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Handler;
+    impl HotkeyHandler for Handler {
+        fn on_hotkey(&self, _: u32, _: &Hotkey) {}
+    }
+    #[test]
+    fn reports_conflicts_and_releases_ownership_on_unregister() {
+        let first = WinHotkey::start(Arc::new(Handler)).unwrap();
+        let second = WinHotkey::start(Arc::new(Handler)).unwrap();
+        let hotkey = (13..=24)
+            .map(|number| Hotkey {
+                modifiers: Modifiers {
+                    ctrl: true,
+                    alt: true,
+                    shift: true,
+                    meta: false,
+                },
+                key: Key::F(number),
+            })
+            .find(|key| first.register(0x2340, key).is_ok())
+            .expect("available native test hotkey");
+        assert!(second.register(0x2341, &hotkey).is_err());
+        first.unregister(0x2340).unwrap();
+        second.register(0x2341, &hotkey).unwrap();
+        second.unregister(0x2341).unwrap();
+        first.stop();
+        second.stop();
     }
 }

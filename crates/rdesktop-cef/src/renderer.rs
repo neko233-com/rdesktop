@@ -28,7 +28,7 @@ use tokio::runtime::Runtime;
 
 // ── Windows GDI FFI ──────────────────────────────────────────────
 #[cfg(target_os = "windows")]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, clippy::upper_case_acronyms)]
 mod gdi {
     use std::ffi::c_void;
 
@@ -105,6 +105,8 @@ enum PendingOp {
     SendToFrontend(u64, String),
 }
 
+type ScreenshotSink = Arc<dyn Fn(&[u8], u32, u32) + Send + Sync>;
+
 pub struct CefRenderer {
     _config: AppConfig,
     pending_pages: RefCell<Vec<(u64, WindowConfig)>>,
@@ -113,7 +115,7 @@ pub struct CefRenderer {
     ipc_handler: Option<Arc<dyn IpcHandler>>,
     mod_shift: RefCell<bool>,
     mod_caps: RefCell<bool>,
-    screenshot_sink: Option<Arc<dyn Fn(&[u8], u32, u32) + Send + Sync>>,
+    screenshot_sink: Option<ScreenshotSink>,
     /// External outbox for native → frontend pushes (e.g. a Node extension
     /// host, or global hotkey / global input events). Drained every frame by
     /// the event loop, same contract as the WebView backend.
@@ -139,7 +141,7 @@ impl CefRenderer {
 
     /// Publish each complete CDP PNG frame to a native Agent or test sink.
     /// The callback receives immutable bytes and the decoded frame dimensions.
-    pub fn set_screenshot_sink(&mut self, sink: Arc<dyn Fn(&[u8], u32, u32) + Send + Sync>) {
+    pub fn set_screenshot_sink(&mut self, sink: ScreenshotSink) {
         self.screenshot_sink = Some(sink);
     }
 
@@ -242,7 +244,8 @@ impl CefRenderer {
         let (w, h) = (info.width, info.height);
         let rgba = &buf[..info.buffer_size()];
         let mut bgra = Vec::with_capacity((w * h * 4) as usize);
-        for c in rgba.chunks_exact(4) {
+        for offset in 0..rgba.len() / 4 {
+            let c = &rgba[offset * 4..offset * 4 + 4];
             bgra.extend_from_slice(&[c[2], c[1], c[0], 255]);
         }
         Some((w, h, bgra))
@@ -440,7 +443,7 @@ impl Renderer for CefRenderer {
             None
         };
 
-        let rt = Runtime::new().map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
+        let rt = Runtime::new().map_err(|e| rdesktop_core::RdesktopError::Cef(e.to_string()))?;
 
         let (viewport_width, viewport_height) = pending_pages
             .first()
@@ -460,13 +463,13 @@ impl Renderer for CefRenderer {
                 has_touch: false,
             })
             .build()
-            .map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
+            .map_err(|e| rdesktop_core::RdesktopError::Cef(e.to_string()))?;
 
         let (browser, mut handler) = rt
             .block_on(async { Browser::launch(cfg).await })
-            .map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
+            .map_err(|e| rdesktop_core::RdesktopError::Cef(e.to_string()))?;
 
-        rt.spawn(async move { while let Some(_) = handler.next().await {} });
+        rt.spawn(async move { while handler.next().await.is_some() {} });
 
         let screenshot_sink = self.screenshot_sink.clone();
         let ipc_handler = self.ipc_handler.clone();
@@ -477,7 +480,7 @@ impl Renderer for CefRenderer {
         for (rd_id, wc) in &pending_pages {
             let page = rt
                 .block_on(async { browser.new_page("about:blank").await })
-                .map_err(|e| rdesktop_core::RdesktopError::Cef(format!("{}", e)))?;
+                .map_err(|e| rdesktop_core::RdesktopError::Cef(e.to_string()))?;
 
             rt.block_on(async {
                 let _ = page.evaluate(Self::bridge_script()).await;
@@ -851,7 +854,7 @@ impl Renderer for CefRenderer {
                         }
                     }
 
-                    for (_, (window, rd_id)) in tao_windows.iter() {
+                    for (window, rd_id) in tao_windows.values() {
                         if let Some((_, p)) = pages.iter().find(|(id, _)| id == rd_id) {
                             Self::blit(window, &p.pixels, p.width, p.height);
                         }

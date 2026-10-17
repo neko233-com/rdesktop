@@ -1,6 +1,7 @@
 use crate::config::{AppConfig, WindowConfig};
 use crate::ipc::IpcHandler;
 use crate::renderer::Renderer;
+type Setup = Box<dyn FnOnce(&mut dyn Renderer) -> crate::Result<()>>;
 
 /// Content to load in the main window.
 pub enum WindowContent {
@@ -16,7 +17,7 @@ pub struct AppBuilder {
     renderer: Option<Box<dyn Renderer>>,
     ipc_handler: Option<Box<dyn IpcHandler>>,
     content: Option<WindowContent>,
-    setup_fn: Option<Box<dyn FnOnce(&mut dyn Renderer) -> crate::Result<()>>>,
+    setup_fn: Option<Setup>,
 }
 
 impl AppBuilder {
@@ -88,7 +89,7 @@ pub struct App {
     renderer: Box<dyn Renderer>,
     ipc_handler: Option<Box<dyn IpcHandler>>,
     content: Option<WindowContent>,
-    setup_fn: Option<Box<dyn FnOnce(&mut dyn Renderer) -> crate::Result<()>>>,
+    setup_fn: Option<Setup>,
 }
 
 impl App {

@@ -48,8 +48,8 @@ pub struct WinInput {
 fn vk_to_key(vk: u32) -> Option<Key> {
     match vk {
         0x41..=0x5A => Some(Key::Letter((vk as u8 - 0x41 + b'a') as char)),
-        0x30..=0x39 => Some(Key::Digit((vk as u8 - 0x30) as u8)),
-        0x70..=0x87 => Some(Key::F((vk as u8 - 0x70 + 1) as u8)),
+        0x30..=0x39 => Some(Key::Digit(vk as u8 - 0x30)),
+        0x70..=0x87 => Some(Key::F(vk as u8 - 0x70 + 1)),
         0x20 => Some(Key::Space),
         0x0D => Some(Key::Enter),
         0x1B => Some(Key::Escape),

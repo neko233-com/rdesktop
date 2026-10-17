@@ -18,7 +18,7 @@ mod windows_impl {
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
         GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-        HBITMAP, HGDIOBJ, SRCCOPY,
+        HGDIOBJ, SRCCOPY,
     };
     use windows::Win32::Media::MediaFoundation::{
         IMFMediaType, IMFSinkWriter, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
@@ -259,7 +259,7 @@ mod windows_impl {
                 // an error path.
                 SelectObject(memory, previous_object);
             }
-            let _ = DeleteObject(HBITMAP::from(bitmap).into());
+            let _ = DeleteObject(bitmap.into());
             let _ = DeleteDC(memory);
             ReleaseDC(None, screen);
             result.map(|_| pixels)

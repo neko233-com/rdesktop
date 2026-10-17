@@ -80,10 +80,11 @@ impl Default for AppConfig {
 ///
 /// - `WebView`: Uses system WebView (WebView2/WebKit). Lightweight (~5MB).
 /// - `Chrome`: Uses Chrome Embedded Framework. Pixel-perfect (~150MB).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum RendererKind {
     /// Use system WebView (WebView2 on Windows, WebKit on macOS/Linux)
     /// Default, lightweight, ~5MB overhead
+    #[default]
     #[serde(rename = "webview")]
     WebView,
 
@@ -91,12 +92,6 @@ pub enum RendererKind {
     /// Larger bundle (~150MB) but guaranteed identical rendering
     #[serde(rename = "chrome")]
     Chrome,
-}
-
-impl Default for RendererKind {
-    fn default() -> Self {
-        Self::WebView
-    }
 }
 
 /// Renderer configuration (deserialized from `[renderer]` section in TOML).
@@ -194,9 +189,10 @@ impl Default for DevConfig {
 /// Extends Tauri v2's model with a `Wallpaper` layer (desktop-level,
 /// click-through) and an `Overlay` layer (always-on-top HUD), enabling
 /// Wallpaper-Engine-style and HUD/PIP scenarios.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WindowKind {
     /// Standard application window (default)
+    #[default]
     #[serde(rename = "normal")]
     Normal,
 
@@ -208,12 +204,6 @@ pub enum WindowKind {
     /// Implies `click_through = true`.
     #[serde(rename = "wallpaper")]
     Wallpaper,
-}
-
-impl Default for WindowKind {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// 32-bit RGBA window icon data used by native window backends.
