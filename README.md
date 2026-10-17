@@ -120,10 +120,19 @@ The core workspace includes abstractions and platform implementations for:
 - structured IPC between Rust and the frontend.
 
 On Windows WebView2, mark non-interactive custom title-bar regions with
-`-webkit-app-region: drag`. WebView2 then handles dragging, double-click
+`app-region: drag` (and `-webkit-app-region: drag` for Chromium compatibility). WebView2 then handles dragging, double-click
 maximize/restore and the right-click system menu from the original native
 mouse event. Keep buttons and menus outside those regions, or give them
-`-webkit-app-region: no-drag`. The `startDrag()` bridge remains available as
+`app-region: no-drag` and `-webkit-app-region: no-drag`. Explicitly exclude
+buttons, their labels, menus and editable fields; native drag regions consume
+the original mouse press before DOM pointer handlers receive it. The
+On Windows the `rdesktop:window-move-resize-start` window event reports entry
+into the native interactive move/resize loop, including CSS dragging and the
+system menu. It is emitted once per loop and can arrive after a quick drag
+finishes. Programmatic positioning does not emit it. A consumer can use it
+to preserve a deliberate window position while switching surfaces; the event
+alone is not proof of a position change.
+The `startDrag()` bridge remains available as
 a fallback for renderers without native CSS drag regions.
 
 Undecorated Windows WebView windows have a native four-DIP resize border

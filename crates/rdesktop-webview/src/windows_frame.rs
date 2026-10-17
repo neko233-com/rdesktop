@@ -16,6 +16,7 @@ use windows_sys::Win32::{
 };
 
 const CLASS_NAME: windows_sys::core::PCWSTR = windows_sys::core::w!("RdesktopResizeBorder");
+const MOVE_RESIZE_STARTED: isize = 4;
 
 fn edge_at(x: i32, y: i32, width: i32, height: i32, border: i32, corner: i32) -> u32 {
     if x < 0 || y < 0 || x >= width || y >= height {
@@ -168,6 +169,19 @@ unsafe extern "system" fn frame_proc(
             RemoveWindowSubclass(hwnd, Some(frame_proc), id);
         }
     }
+    if msg == WM_ENTERSIZEMOVE {
+        // WebView2 CSS dragging may enter the native move loop without Tao's
+        // DecorationsClick. Retain this edge until the event loop can report
+        // it, including very quick drags that finish before the queued event.
+        let flags = unsafe { GetWindowLongPtrW(child as HWND, GWLP_USERDATA) };
+        unsafe {
+            SetWindowLongPtrW(
+                child as HWND,
+                GWLP_USERDATA,
+                (flags | MOVE_RESIZE_STARTED) as _,
+            );
+        }
+    }
     let result = unsafe { DefSubclassProc(hwnd, msg, wp, lp) };
     if msg == WM_GETMINMAXINFO && lp != 0 && unsafe { IsWindowVisible(child as HWND) } != 0 {
         // tao 0.36 treats undecorated constraints as outer sizes, but Windows
@@ -189,6 +203,21 @@ unsafe extern "system" fn frame_proc(
 }
 
 impl NativeResizeBorder {
+    pub(crate) fn take_move_resize_start(&self) -> bool {
+        let flags = unsafe { GetWindowLongPtrW(self.hwnd, GWLP_USERDATA) };
+        if flags & MOVE_RESIZE_STARTED == 0 {
+            return false;
+        }
+        unsafe {
+            SetWindowLongPtrW(
+                self.hwnd,
+                GWLP_USERDATA,
+                (flags & !MOVE_RESIZE_STARTED) as _,
+            );
+        }
+        true
+    }
+
     pub(crate) fn new(window: &Window, has_min: bool, has_max: bool) -> io::Result<Self> {
         static REGISTERED: OnceLock<Result<(), i32>> = OnceLock::new();
         let registered = REGISTERED.get_or_init(|| {
@@ -316,6 +345,43 @@ impl NativeResizeBorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_move_edge_survives_a_quick_loop_and_preserves_constraint_flags() {
+        use tao::{
+            event_loop::EventLoopBuilder, platform::windows::EventLoopBuilderExtWindows,
+            window::WindowBuilder,
+        };
+        let event_loop = EventLoopBuilder::<()>::with_user_event()
+            .with_any_thread(true)
+            .build();
+        let window = WindowBuilder::new()
+            .with_visible(false)
+            .with_decorations(false)
+            .build(&event_loop)
+            .unwrap();
+        let border = NativeResizeBorder::new(&window, true, true).unwrap();
+        assert!(!border.take_move_resize_start());
+        // Programmatic layout is not a native interactive move/resize loop.
+        window.set_outer_position(tao::dpi::PhysicalPosition::new(100, 100));
+        window.set_inner_size(tao::dpi::PhysicalSize::new(640, 480));
+        assert!(!border.take_move_resize_start());
+        unsafe {
+            SendMessageW(window.hwnd() as HWND, WM_ENTERSIZEMOVE, 0, 0);
+            SendMessageW(window.hwnd() as HWND, WM_EXITSIZEMOVE, 0, 0);
+        }
+        assert!(border.take_move_resize_start());
+        assert!(!border.take_move_resize_start());
+        assert_eq!(unsafe { GetWindowLongPtrW(border.hwnd, GWLP_USERDATA) }, 3);
+        unsafe {
+            SendMessageW(window.hwnd() as HWND, WM_ENTERSIZEMOVE, 0, 0);
+        }
+        assert!(border.take_move_resize_start());
+        unsafe {
+            SendMessageW(window.hwnd() as HWND, WM_EXITSIZEMOVE, 0, 0);
+        }
+        assert!(!border.take_move_resize_start());
+    }
 
     #[test]
     fn edges_and_corners_exclude_content_and_outside_points() {

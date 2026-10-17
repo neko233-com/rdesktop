@@ -68,3 +68,51 @@ that the list and inspector both change. At an 800×602 viewport all three panes
 must remain visible; console errors and framework overlays must be absent.
 Browser mode uses preview data and cannot validate native file icons or plugin
 Node/Electron execution. Those require separate desktop checks.
+
+## Native CSS title-bar interaction (2026-10-18)
+
+Wry 0.56.1 already enables WebView2 non-client regions. Mark title regions with
+`app-region: drag` plus the Chromium-prefixed form, and explicitly mark controls
+`no-drag`. Moving from an asynchronous application command to CSS regions made
+quick native dragging work in iHub's settings, launcher strip and plugin center.
+
+CSS dragging did not emit Tao's `DecorationsClick` in this local run. The
+framework now latches `WM_ENTERSIZEMOVE` on the owning window and reports one
+`rdesktop:window-move-resize-start` event on the following move/resize/focus
+dispatch. The latch survives a quick completed loop and is consumed once;
+configured minimum/maximum tracking flags remain intact. Programmatic layout
+does not enter that loop. The hidden native-window regression test exercises
+those message sequences without moving another application's windows.
+
+The full workspace checks above passed, including 38 tests and one separately
+opted-in installer compiler test remaining ignored. The consumer was first
+built against the local framework using command-line Cargo patch overrides;
+these overrides are not checked-in dependency paths.
+
+Repeat the browser inspection in the consumer at `http://127.0.0.1:1420/`:
+
+1. Focus search, press Ctrl+comma, and inspect the settings header.
+2. Read `getComputedStyle(header).getPropertyValue('app-region')`; it is `drag`.
+   Both header buttons read `no-drag`.
+3. Click the back button, then the local-settings button in the plugin center.
+4. Confirm settings opens and console warnings/errors remain empty.
+
+Those browser requests passed. The equivalent native Windows sequence also
+passed with the actual window bounds captured after every input:
+
+| Step | Visible window origin | Visible screenshot size |
+| --- | --- | --- |
+| Settings before drag | (559,210) | 802×604 |
+| Drag title by (+100,+40) | (659,250) | 802×604 |
+| Escape to launcher | (659,250) | 802×382 |
+| Reopen settings | (659,250) | 802×604 |
+| Back to plugin center, drag strip by (-50,+30) | (609,280) | 802×604 |
+| Open settings, click close | (609,280) | 802×382 |
+| Drag launcher strip by (+60,+40) | (669,320) | 802×382 |
+
+The plugin-center input accepted and filtered `JSON`, then was cleared. Dragging
+that input did not move the window. Header buttons were tested with actual
+coordinate clicks, so an accessibility invocation did not bypass hit testing.
+Hiding and re-launching the existing process retained its PID and reset the
+visible session to the centered launcher. This is Windows x64 evidence only;
+other platforms and touch/pen hardware were not runtime-tested here.

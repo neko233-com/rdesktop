@@ -88,6 +88,14 @@ Chromium 路径要求主机上存在兼容的 Chrome、Chromium 或 Edge 可执�
 - 全局快捷键，以及默认关闭、显式开启的全局输入钩子；
 - Rust 与前端之间的结构化 IPC。
 
+Windows WebView2 的自定义标题区域使用 `app-region: drag`，并可同时保留
+`-webkit-app-region: drag`。按钮、标签、菜单和输入控件须显式设置
+`app-region: no-drag` / `-webkit-app-region: no-drag`，防止被拖动区域截获。
+Windows 原生移动／缩放循环会派发一次 `rdesktop:window-move-resize-start`
+窗口事件，快速拖动可能在结束后才收到；程序主动定位不派发。应用可据此在
+切换界面时保留用户拖动的位置。该事件只表示交互，不代表窗口已经移动。
+其他渲染器仍可使用 `window.__RDESKTOP_WINDOW__.startDrag()` 回退路径。
+
 ## 快速开始
 
 ### 安装 CLI

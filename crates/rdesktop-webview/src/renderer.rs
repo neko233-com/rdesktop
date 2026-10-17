@@ -169,6 +169,7 @@ impl WindowEntry {
     }
 
     fn publish_window_state(&self) {
+        self.publish_native_interaction();
         #[cfg(target_os = "windows")]
         if let Some(border) = &self.resize_border {
             if let Err(error) = border.update(&self.window) {
@@ -182,6 +183,19 @@ impl WindowEntry {
             self.window.is_decorated(),
         );
         let _ = self.webview.evaluate_script(&script);
+    }
+
+    fn publish_native_interaction(&self) {
+        #[cfg(target_os = "windows")]
+        if self
+            .resize_border
+            .as_ref()
+            .is_some_and(|border| border.take_move_resize_start())
+        {
+            let _ = self.webview.evaluate_script(
+                "window.dispatchEvent(new Event('rdesktop:window-move-resize-start'));",
+            );
+        }
     }
 }
 
@@ -1296,6 +1310,16 @@ impl Renderer for WebViewRenderer {
                     // Process pending operations
                     for op in &pending_ops {
                         Self::apply_op(op, &windows, &rdesktop_to_tao, asset_root.is_some() || embedded_assets.is_some());
+                    }
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::Moved(_),
+                    window_id,
+                    ..
+                } => {
+                    if let Some(entry) = windows.get(&window_id) {
+                        entry.publish_native_interaction();
                     }
                 }
 
