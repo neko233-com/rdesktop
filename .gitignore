@@ -1,5 +1,6 @@
 # Rust
 /target/
+**/target/
 **/*.rs.bk
 # Cargo.lock is committed on purpose: this workspace ships binary apps
 # (rdesktop-cli, rdesktop-dev, the examples) and needs reproducible,

@@ -1,12 +1,9 @@
 //! rdesktop-bundler: Cross-platform packaging and installer generation.
 //!
-//! Solves Tauri's incomplete bundling story:
-//! - Windows: Direct .exe output + NSIS installer + WiX MSI (all supported)
-//! - macOS: .app bundle + DMG + notarization
-//! - Linux: AppImage + .deb + .rpm
-//!
-//! Unlike Tauri, all formats work out of the box without external tool dependencies
-//! where possible. NSIS and WiX are bundled as pre-built tools.
+//! Windows NSIS/MSI packaging invokes installed NSIS and WiX 3 compilers.
+//! Compiler failures and invalid artifacts fail the build. The portable target
+//! copies the application executable; applications embed their own assets.
+//! Other platform backends have separate tooling requirements and validation.
 
 pub mod common;
 pub mod config;

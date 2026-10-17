@@ -7,6 +7,7 @@ use rdesktop_core::config::AppConfig;
 use crate::common::{BundleResult, Bundler};
 use crate::config::BundleTarget;
 
+#[derive(Default)]
 pub struct MacOsBundler;
 
 impl MacOsBundler {
@@ -135,7 +136,7 @@ impl Bundler for MacOsBundler {
         &self,
         config: &AppConfig,
         target: &BundleTarget,
-        binary_path: &PathBuf,
+        binary_path: &Path,
     ) -> anyhow::Result<BundleResult> {
         match target {
             BundleTarget::MacOsApp => self.bundle_app(config, binary_path),

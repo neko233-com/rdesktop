@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rdesktop_core::config::AppConfig;
 
@@ -24,6 +24,6 @@ pub trait Bundler {
         &self,
         config: &AppConfig,
         target: &BundleTarget,
-        binary_path: &PathBuf,
+        binary_path: &Path,
     ) -> anyhow::Result<BundleResult>;
 }

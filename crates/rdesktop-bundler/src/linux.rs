@@ -7,6 +7,7 @@ use rdesktop_core::config::AppConfig;
 use crate::common::{BundleResult, Bundler};
 use crate::config::BundleTarget;
 
+#[derive(Default)]
 pub struct LinuxBundler;
 
 impl LinuxBundler {
@@ -142,7 +143,7 @@ Description: {description}
             name = config.name.to_lowercase().replace(' ', "-"),
             version = config.version,
             maintainer = config.bundle.copyright.as_deref().unwrap_or("Unknown"),
-            description = format!("{} desktop application", config.name),
+            description = format_args!("{} desktop application", config.name),
         )
     }
 }
@@ -152,7 +153,7 @@ impl Bundler for LinuxBundler {
         &self,
         config: &AppConfig,
         target: &BundleTarget,
-        binary_path: &PathBuf,
+        binary_path: &Path,
     ) -> anyhow::Result<BundleResult> {
         match target {
             BundleTarget::LinuxAppImage => self.bundle_appimage(config, binary_path),
