@@ -251,6 +251,7 @@ rdesktop agent --session .rdesktop/agent-cli-PID.json uia --params-file uia-acti
 | `table-headers`, `table-item-headers` | Table/TableItem row and column header element collections; `max_items` 1..256 per array, default 32 |
 | `selection` | Selection pattern's actual selected-element collection; `max_items` 1..256, default 32; explicit `strategy` described below |
 | `containing-grid`, `selection-container` | GridItem/SelectionItem native owner element |
+| `relations` | Native `described-by`, `labeled-by`, `controller-for`, `flows-to` or `flows-from`; required `relation`, optional `max_items` 1..256 (default 32) |
 
 These call the real Windows COM interfaces. Unsupported/read-only/disabled
 operations fail explicitly; the framework does not synthesize DOM events or
@@ -284,6 +285,24 @@ element for multiple grid coordinates; inspection includes row/column spans.
 Inspection also reports Grid, GridItem, Table, Dock, MultipleView, Selection2,
 Transform2 and LegacyIAccessible scalar states when supplied by the provider.
 Legacy values obey the same password redaction as Value pattern values.
+
+`relations` returns `{relation, related:{elements,total,max_items,truncated}}`
+from the provider's current COM properties. Related elements use the same
+bounded, window-scoped descriptors as collections, without text/value reads.
+A successful null property is an empty collection; a failed HRESULT remains
+an error. Labels use `CurrentLabeledBy`; arrays use `CurrentDescribedBy`,
+`CurrentControllerFor`, `CurrentFlowsTo` and `IUIAutomationElement2::CurrentFlowsFrom`.
+Runtime IDs are opaque current identities and must be resolved again after
+navigation or element replacement.
+
+Snapshots and inspection expose independent raw `help_text` and
+`full_description` properties. The latter reads
+`IUIAutomationElement6::CurrentFullDescription`; unavailable is `null` and an
+available empty string stays empty. Do not infer absent descriptions from
+`help_text` alone: the tested WebView2 email reports a complete correction in
+`full_description`, but empty `help_text` and an empty `described-by` array.
+The framework neither fills that array from DOM nor copies one native
+description property into another.
 
 `selection` defaults to `strategy:"provider"`, directly reading
 `GetCurrentSelection`. The WebView2 fixture reports an empty grid collection
@@ -339,6 +358,7 @@ npm ci --ignore-scripts
 node scripts/verify-native-accessibility.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/a11y-visible
 node scripts/verify-native-uia-actions.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/uia-visible
 node scripts/verify-native-uia-collections.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/collections-visible node_modules/axe-core/axe.min.js target/debug/rdesktop.exe
+node scripts/verify-native-uia-relations.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/relations-visible
 node scripts/verify-native-dialogs.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/dialogs-visible target/debug/rdesktop.exe
 # Repeat with dev --headless and a different artifact directory.
 cargo fmt --all -- --check

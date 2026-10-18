@@ -13,7 +13,27 @@ pub(super) const OPERATIONS: &[&str] = &[
     "selection",
     "containing-grid",
     "selection-container",
+    "relations",
 ];
+
+pub(super) fn relation(params: &Value) -> Result<&str, String> {
+    params["relation"]
+        .as_str()
+        .filter(|value| {
+            [
+                "described-by",
+                "labeled-by",
+                "controller-for",
+                "flows-to",
+                "flows-from",
+            ]
+            .contains(value)
+        })
+        .ok_or_else(|| {
+            "UIA relation must be described-by, labeled-by, controller-for, flows-to or flows-from"
+                .into()
+        })
+}
 
 pub(super) fn coordinate(params: &Value, name: &str) -> Result<i32, String> {
     params[name]
@@ -43,6 +63,59 @@ struct Scope<'a> {
 }
 
 impl Scope<'_> {
+    fn relations(
+        &self,
+        element: &IUIAutomationElement,
+        params: &Value,
+    ) -> windows::core::Result<Value> {
+        let relation = relation(params).unwrap();
+        let maximum = limit(params).unwrap();
+        // These properties legitimately return S_OK + null. Keep that distinct
+        // from a failed HRESULT, and own any returned COM pointer immediately.
+        let mut array: Option<IUIAutomationElementArray> = None;
+        let related = unsafe {
+            let table = element.vtable();
+            match relation {
+                "labeled-by" => {
+                    let mut label: Option<IUIAutomationElement> = None;
+                    (table.CurrentLabeledBy)(element.as_raw(), &mut label as *mut _ as _).ok()?;
+                    let elements = label
+                        .as_ref()
+                        .map(|item| self.descriptor(item))
+                        .transpose()?
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    json!({"total":elements.len(),"truncated":false,"elements":elements,"max_items":maximum})
+                }
+                _ => {
+                    if relation == "flows-from" {
+                        let element2 = element.cast::<IUIAutomationElement2>()?;
+                        (element2.vtable().CurrentFlowsFrom)(
+                            element2.as_raw(),
+                            &mut array as *mut _ as _,
+                        )
+                        .ok()?;
+                    } else {
+                        let method = match relation {
+                            "described-by" => table.CurrentDescribedBy,
+                            "controller-for" => table.CurrentControllerFor,
+                            "flows-to" => table.CurrentFlowsTo,
+                            _ => unreachable!("validated UIA relation"),
+                        };
+                        method(element.as_raw(), &mut array as *mut _ as _).ok()?;
+                    }
+                    match array {
+                        Some(array) => self.array(array, maximum)?,
+                        None => {
+                            json!({"total":0,"truncated":false,"elements":[],"max_items":maximum})
+                        }
+                    }
+                }
+            }
+        };
+        Ok(json!({"relation":relation,"related":related}))
+    }
+
     fn selected_items(
         &self,
         container: &IUIAutomationElement,
@@ -196,6 +269,7 @@ impl Scope<'_> {
     ) -> windows::core::Result<Value> {
         unsafe {
             match operation {
+                "relations" => self.relations(element, params),
                 "grid-item" => {
                     let pattern = element
                         .GetCurrentPatternAs::<IUIAutomationGridPattern>(UIA_GridPatternId)?;

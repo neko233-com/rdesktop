@@ -97,10 +97,58 @@ For manual NVDA repetition, open Speech Viewer, focus the actual app, perform
 one action, then inspect both its state and new speech output. Include a plain
 production EXE, not only the debug fixture. Quit NVDA normally afterward.
 
+## Actual Windows Narrator acceptance, 2026-10-18
+
+Windows Narrator `10.0.26100.8972` was also run on build 26200. Its actual
+Speech Recap was inspected visually after individual actions; application
+state was checked independently. Narrator was exited through its normal
+Home **Exit Narrator** control. No system startup setting was changed.
+Microsoft documents Speech Recap in the
+[complete Narrator guide](https://support.microsoft.com/en-us/accessibility/windows/narrator/complete-guide-to-narrator).
+
+The same production EXE with SHA-256
+`9453561b7b80f56264a7c6dce48cb96fccb474d814f0a14a5dac71d01a987878`
+passed four actual reader cases: physical Tab read the skip link, Enter
+reached the main landmark, the name field's label and help were read, and
+typing `Reader narrator` then Enter produced the actual Rust result
+`Hello, Reader narrator!`, which the reader emitted through the live status.
+Its separate production-isolation check passed with zero development
+markers, no session/debug navigation, and normal exit.
+
+Eight fixture observations covered required label/help, the email negative
+control, the corrected email, checkbox Space, protected password, native
+Invoke status, modal opening and Escape focus return. Narrator initially
+read the email's invalid state without its correction when only
+`aria-errormessage` supplied the relationship. Adding `aria-describedby`
+made it read `Enter a valid email address.` while retaining invalid state.
+NVDA 2026.2 was then repeated on this example. Supplying both associations
+made its actual Speech Viewer repeat the correction twice. The final fixture
+uses only `aria-describedby` with `aria-invalid`; NVDA's focused-item output
+read the correction once. Narrator was restarted and repeated against that
+final single-association fixture; it also read the correction once with the
+invalid state. This is a compatibility correction in the example,
+not a synthesized reader announcement. Native inspection confirms the correction is published as
+`full_description`, despite empty `help_text` and `described-by` array.
+
+Native Invoke emitted `Preferences saved locally`. Physical Space opened
+the modal and Narrator emitted its name, dialog role, close button and body.
+Escape closed it and returned focus to the opener, whose name was read.
+Password focus required explicit native ScrollIntoView before SetFocus;
+the offscreen provider's failed HRESULT was retained. After scrolling,
+the reader emitted protected bullets and UIA value remained redacted.
+These selected utterances do not certify audible quality or braille devices.
+
+Run `scripts/verify-native-uia-relations.mjs` for repeatable native description
+and relationship checks. It removes/restores the error association as a
+negative control, tests real labels, forward/reverse flows, controller
+relations, bounded arrays, successful empty COM properties, password
+descriptors and foreign/closed/stale identities. Hidden runs preserve actual
+provider availability without showing the window or substituting engine AX.
+
 ## Remaining acceptance
 
-Speech Viewer proves emitted utterances, not audible intelligibility. Windows
-Narrator, braille hardware, voice control, switch access, physical external
+Speech Viewer and Speech Recap prove emitted utterances, not audible
+intelligibility. Braille hardware, voice control, switch access, physical external
 file drops, Windows 10, and non-Windows assistive technologies require separate
 runtime acceptance. Forced-color and reduced-motion tests use real engine media
 emulation; they do not certify every Windows theme or OS setting transition.

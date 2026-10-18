@@ -22,7 +22,7 @@ const find=(nodes,role,name)=>nodes.find(node=>!node.ignored&&node.role?.value==
 const property=(node,name)=>node.properties?.find(item=>item.name===name)?.value?.value;
 let nodes=await tree();assert(find(nodes,'heading','Native accessibility'));
 const textbox=find(nodes,'textbox','Display name');assert(textbox);assert.equal(property(textbox,'required'),true);
-assert.equal(find(nodes,'textbox','Email').description?.value??'', '');
+assert.equal(find(nodes,'textbox','Email').description?.value, 'Enter a valid email address.');
 assert.equal(property(find(nodes,'textbox','Email'),'invalid'),'true');
 assert(find(nodes,'checkbox','Receive notifications'));assert(find(nodes,'slider','Volume'));assert(find(nodes,'table','Compatibility examples'));
 assert.equal(property(find(nodes,'button','Unavailable action'),'disabled'),true);
@@ -70,7 +70,7 @@ const dom=await req('cdp',{method:'DOM.getDocument',params:{depth:0}});
 assert((await req('accessibility',{method:'queryAXTree',params:{nodeId:dom.root.nodeId,role:'button',accessibleName:'Save preferences'}})).result.nodes.length);
 // OS accessibility is independently rooted in the same real native HWND.
 const uia=await req('uia',{max_nodes:1000});assert.equal(uia.source,'windows-uia');assert(uia.nodes.length);
-if(!headless){assert(uia.nodes.some(node=>node.name==='Native accessibility'));assert(uia.nodes.some(node=>node.name==='Save preferences'));}
+if(!headless){assert(uia.nodes.some(node=>node.name==='Native accessibility'));assert(uia.nodes.some(node=>node.name==='Save preferences'));assert.equal(uia.nodes.find(node=>node.automation_id==='email'&&node.control_type===50004)?.full_description,'Enter a valid email address.');}
 for(const node of uia.nodes.filter(node=>node.password)){assert.equal(node.value,null);}
 await writeFile(join(output,'windows-uia.json'),JSON.stringify(uia,null,2));
 await writeFile(join(output,'engine-ax.json'),JSON.stringify(await req('accessibility'),null,2));

@@ -7,7 +7,7 @@
 <main id="main" tabindex="-1" aria-label="Native app content"><h1>Native accessibility</h1>
 <section aria-labelledby="forms-title"><h2 id="forms-title">Form semantics</h2>
 <label for="display-name">Display name</label><input id="display-name" required aria-describedby="name-help"><p id="name-help">Used only in this local test.</p>
-<label for="email">Email</label><input id="email" type="email" aria-invalid="true" aria-errormessage="email-error"><p id="email-error" role="alert">Enter a valid email address.</p>
+<label for="email">Email</label><input id="email" type="email" aria-invalid="true" aria-describedby="email-error"><p id="email-error" role="alert">Enter a valid email address.</p>
 <fieldset><legend>Preferences</legend><label><input id="notifications" type="checkbox"> Receive notifications</label><label><input id="local" type="radio" name="storage" checked> Local storage</label><label><input id="remote" type="radio" name="storage"> Remote storage</label></fieldset>
 <label for="volume">Volume</label><input id="volume" type="range" min="0" max="100" value="50">
 <button id="disabled" disabled>Unavailable action</button><button id="aria-disabled" aria-disabled="true">Unavailable custom action</button><button hidden>Hidden action</button>

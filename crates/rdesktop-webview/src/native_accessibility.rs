@@ -52,7 +52,19 @@ pub const OPERATIONS: &[&str] = &[
     "selection",
     "containing-grid",
     "selection-container",
+    "relations",
 ];
+
+fn full_description(element: &IUIAutomationElement) -> Option<String> {
+    unsafe {
+        element
+            .cast::<IUIAutomationElement6>()
+            .ok()?
+            .CurrentFullDescription()
+            .ok()
+            .map(|value| value.to_string())
+    }
+}
 
 struct Com;
 impl Drop for Com {
@@ -216,6 +228,7 @@ pub fn snapshot(hwnd: isize, pid: u32, params: &Value) -> Result<Value, String> 
                 "process_id":element.CurrentProcessId().ok(),
                 "native_window_handle":element.CurrentNativeWindowHandle().ok().map(|value|format!("{:X}",value.0 as usize)),
                 "help_text":element.CurrentHelpText().ok().map(|v|v.to_string()),
+                "full_description":full_description(&element),
                 "access_key":element.CurrentAccessKey().ok().map(|v|v.to_string()),
                 "accelerator_key":element.CurrentAcceleratorKey().ok().map(|v|v.to_string()),
                 "aria_role":element.CurrentAriaRole().ok().map(|v|v.to_string()),
@@ -533,6 +546,7 @@ fn inspect(element: &IUIAutomationElement) -> Value {
         json!({"runtime_id":runtime_id(element),"name":element.CurrentName().ok().map(|value|value.to_string()),
             "automation_id":element.CurrentAutomationId().ok().map(|value|value.to_string()),"control_type":element.CurrentControlType().ok().map(|value|value.0),
             "class_name":element.CurrentClassName().ok().map(|value|value.to_string()),"password":password,
+            "help_text":element.CurrentHelpText().ok().map(|value|value.to_string()),"full_description":full_description(element),
             "enabled":element.CurrentIsEnabled().ok().map(|value|value.as_bool()),"focused":element.CurrentHasKeyboardFocus().ok().map(|value|value.as_bool()),"states":states})
     }
 }
@@ -550,6 +564,7 @@ pub fn is_mutating(params: &Value) -> bool {
             | "selection"
             | "containing-grid"
             | "selection-container"
+            | "relations"
     )
 }
 
@@ -602,6 +617,7 @@ fn validate_request(params: &Value) -> Result<&str, String> {
         "text" | "text-selection" => &["target", "max_chars"],
         "grid-item" => &["target", "row", "column"],
         "table-headers" | "table-item-headers" => &["target", "max_items"],
+        "relations" => &["target", "relation", "max_items"],
         "selection" => &[
             "target",
             "max_items",
@@ -639,9 +655,12 @@ fn validate_request(params: &Value) -> Result<&str, String> {
     }
     if matches!(
         operation,
-        "table-headers" | "table-item-headers" | "selection"
+        "table-headers" | "table-item-headers" | "selection" | "relations"
     ) {
         collections::limit(params)?;
+    }
+    if operation == "relations" {
+        collections::relation(params)?;
     }
     if operation == "selection"
         && params.get("strategy").is_some_and(|value| {
@@ -1101,6 +1120,35 @@ mod tests {
         assert!(Action::parse("set-scroll-percent", &json!({"vertical_percent":100})).is_ok());
         assert!(!is_mutating(&json!({"operation":"text"})));
         assert!(!is_mutating(&json!({"operation":"selection"})));
+        assert!(!is_mutating(&json!({"operation":"relations"})));
         assert!(is_mutating(&json!({"operation":"text-select"})));
+    }
+
+    #[test]
+    fn relation_queries_are_bounded_and_reject_unrecognized_properties() {
+        for relation in [
+            "described-by",
+            "labeled-by",
+            "controller-for",
+            "flows-to",
+            "flows-from",
+        ] {
+            assert!(validate_request(
+                &json!({"operation":"relations","relation":relation,"max_items":256})
+            )
+            .is_ok());
+        }
+        for params in [
+            json!({"operation":"relations"}),
+            json!({"operation":"relations","relation":null}),
+            json!({"operation":"relations","relation":"desktop"}),
+            json!({"operation":"relations","relation":"described-by","max_items":0}),
+            json!({"operation":"relations","relation":"described-by","max_items":257}),
+            json!({"operation":"relations","relation":"described-by","max_items":1.5}),
+            json!({"operation":"relations","relation":"described-by","value":"ignored"}),
+            json!({"operation":"inspect","relation":"described-by"}),
+        ] {
+            assert!(validate_request(&params).is_err(), "{params}");
+        }
     }
 }
