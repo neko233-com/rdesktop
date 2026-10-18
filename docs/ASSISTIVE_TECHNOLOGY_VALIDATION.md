@@ -155,8 +155,6 @@ Its independent isolation run rejected development activation and completed
 with normal exit. This version-specific production evidence is separate from
 the earlier Narrator baseline and the error-description regression above.
 
-## Remaining acceptance
-
 The 0.1.15 production application repeated three actual NVDA 2026.2 groups:
 persistent label/help and landmarks, physical Shift+Tab/Enter skip navigation,
 and physical typing/Enter to the real Rust handler. Application UIA exposed
@@ -174,6 +172,8 @@ cover wait limits, callback/timer cleanup and failed transports. A real
 These IPC checks complement accessibility tests; they do not expand the
 assistive-technology certification scope. Narrator observations above remain
 the earlier baseline rather than a new 0.1.15 runtime run.
+
+## Remaining acceptance
 
 Speech Viewer and Speech Recap prove emitted utterances, not audible
 intelligibility. Braille hardware, voice control, switch access, physical external
