@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.13
 
 The CLI-generated starter and Hello World now provide persistent labels,
 semantic landmarks, a visible keyboard skip link, Enter submission and live
@@ -19,6 +19,8 @@ actions and production EXEs. The baseline starter's missing Enter behavior and
 unannounced results were reproduced before repair. The exact matrix, tested
 binaries and remaining assistive-technology acceptance are documented in
 [assistive technology validation](docs/ASSISTIVE_TECHNOLOGY_VALIDATION.md).
+The final 0.1.13 generated production EXE repeated label/landmark, keyboard
+skip-link and real Rust live-result speech checks successfully.
 
 ## 0.1.12
 

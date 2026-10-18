@@ -43,6 +43,18 @@ Debug activation/session/inspector markers were absent and its PE subsystem
 was Windows GUI. These results describe the tested binaries; a later release
 candidate still needs its own build and isolation checks.
 
+The 0.1.13 candidate repeated the last three checks on a fresh CLI-generated
+project compiled against the local 0.1.13 crates, without `native-agent`.
+NVDA read `Your name`, the main landmark and `Skip to content`; keyboard
+activation navigated to `#main`, then Tab reached the input. Native typing of
+`Reader final` and Enter produced and announced `Hello, Reader final!` from
+the actual Rust handler. This production EXE SHA-256 was
+`9453561b7b80f56264a7c6dce48cb96fccb474d814f0a14a5dac71d01a987878`.
+Its independent isolation run verified GUI subsystem, zero development
+markers, no debug navigation/session despite activation environment variables,
+and normal exit. The exact embedded template SHA-256 was
+`dd5a4a81e6de1ec4a7ed503a63b0f5a80a28ef7a892b2a05fa548425d3f48748`.
+
 The published 0.1.12 template provided the negative control: its input had only
 a placeholder, Enter did not submit, and the button's visible Rust result was
 not read because its generic result element was not a live region. The
