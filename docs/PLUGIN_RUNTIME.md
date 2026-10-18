@@ -72,6 +72,17 @@ drop it when the document retires. A reload needs a new bridge; a second documen
 cannot attach to the first document's module/callback table. The example
 `examples/node_plugin` shows this wiring without adding it to the CLI or starters.
 
+Applications with an existing private per-plugin asset server can use
+`RendererModules::start(config, base_url)` instead. Inject its
+`initialization_script()` into the native document and route POST `__node` under
+that exact base to `respond(origin, capability, document, request)`. The response
+is an HTTP status and JSON envelope. The application remains responsible for
+body/header limits, HTTP method checks and retiring the session with its lease;
+the framework reuses the same origin/capability/document checks as its standalone
+server. This keeps the application's existing database and host API endpoints
+on the same private origin without granting cross-origin access or adding a
+second asset server.
+
 The loopback service binds only `127.0.0.1`, uses a random 256-bit capability,
 requires the exact Host and Origin plus a custom capability header, and binds
 Node calls to the first attached document identity. It supplies no CORS grant.

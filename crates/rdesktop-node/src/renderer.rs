@@ -38,6 +38,131 @@ struct Service {
     document: Mutex<Option<String>>,
 }
 
+/// A renderer's Node module session hosted by an application's existing private
+/// asset server. The application must enforce POST, frame/body limits and lease
+/// retirement; this object enforces origin, capability and document ownership.
+pub struct RendererModules {
+    node: Arc<NodeRuntime>,
+    origin: String,
+    token: String,
+    script: String,
+    document: Mutex<Option<String>>,
+}
+
+impl RendererModules {
+    pub fn start(config: NodeConfig, base_url: &str) -> Result<Self, NodeError> {
+        if config.timeout > Duration::from_secs(5) {
+            return Err(NodeError::Configuration(
+                "renderer Node calls must use a deadline of at most 5000 ms".into(),
+            ));
+        }
+        let authority = base_url
+            .strip_prefix("http://127.0.0.1:")
+            .and_then(|value| value.split_once('/'))
+            .filter(|(port, path)| {
+                port.parse::<u16>().is_ok_and(|port| port != 0)
+                    && base_url.ends_with('/')
+                    && !path.contains(['?', '#', '\\', '\r', '\n'])
+                    && !path.split('/').any(|part| matches!(part, "." | ".."))
+            })
+            .ok_or_else(|| {
+                NodeError::Configuration(
+                    "module base must be a private 127.0.0.1 HTTP lease ending in /".into(),
+                )
+            })?;
+        let origin = format!("http://127.0.0.1:{}", authority.0);
+        let node = Arc::new(NodeRuntime::start_modules(config)?);
+        let metadata = node.module_request(json!({"operation":"bootstrap"}))?;
+        let token = metadata["token"]
+            .as_str()
+            .filter(|token| token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| NodeError::Protocol("invalid renderer capability".into()))?
+            .to_owned();
+        let options = json!({"base":base_url,"token":token,"preload":metadata["preload"],"node":metadata["node"]});
+        Ok(Self {
+            node,
+            origin,
+            token,
+            script: format!("({LOADER})({options});"),
+            document: Mutex::new(None),
+        })
+    }
+    pub fn initialization_script(&self) -> &str {
+        &self.script
+    }
+    pub fn node_process_id(&self) -> u32 {
+        self.node.process_id()
+    }
+    pub fn respond(
+        &self,
+        origin: &str,
+        capability: &str,
+        document: &str,
+        request: Value,
+    ) -> (u16, Value) {
+        module_reply(
+            &self.node,
+            &self.origin,
+            &self.token,
+            &self.document,
+            origin,
+            capability,
+            document,
+            request,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn module_reply(
+    node: &NodeRuntime,
+    expected_origin: &str,
+    token: &str,
+    current_document: &Mutex<Option<String>>,
+    origin: &str,
+    capability: &str,
+    document: &str,
+    request: Value,
+) -> (u16, Value) {
+    let denied = |message| {
+        (
+            403,
+            json!({"success":false,"error":{"name":"Error","message":message}}),
+        )
+    };
+    if origin != expected_origin || capability != token {
+        return denied("Node calls require the current private plugin origin.");
+    }
+    if document.len() != 32 || !document.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return denied("Missing renderer document identity.");
+    }
+    {
+        let mut current = current_document
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if request["operation"] == "attach" && current.is_none() {
+            *current = Some(document.into());
+        }
+        if current.as_deref() != Some(document) {
+            return denied("Node lease belongs to another renderer document.");
+        }
+    }
+    if request["operation"] == "attach" {
+        return (200, json!({"success":true,"data":{}}));
+    }
+    let body = match node.module_request(request) {
+        Ok(value) => json!({"success":true,"data":value}),
+        Err(NodeError::Preload(error)) => {
+            json!({"success":false,"error":{"name":error.name,"message":error.message,"code":error.code}})
+        }
+        Err(NodeError::Busy) => {
+            json!({"success":false,"error":{"name":"Error","code":"RDESKTOP_NODE_BUSY","message":"Node runtime is busy; this operation did not begin."}})
+        }
+        Err(error) => json!({"success":false,"error":{"name":"Error","message":error.to_string()}}),
+    };
+    (200, body)
+}
+
 impl RendererBridge {
     pub fn start(config: NodeConfig, entry: impl AsRef<Path>) -> Result<Self, NodeError> {
         // Sync browser calls must have a short, explicit worker deadline.
@@ -272,55 +397,25 @@ impl Service {
                 Ok(value) => value,
                 Err(_) => return response(stream, 400, "text/plain", b"Invalid Node JSON."),
             };
-            let Some(document) = headers.get("x-rdesktop-document").filter(|value| {
-                value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-            }) else {
-                return response(
-                    stream,
-                    403,
-                    "text/plain",
-                    b"Missing renderer document identity.",
-                );
-            };
-            {
-                let mut current = self
-                    .document
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                if request["operation"] == "attach" && current.is_none() {
-                    *current = Some(document.to_string());
-                }
-                if current.as_deref() != Some(document) {
-                    return response(
-                        stream,
-                        403,
-                        "text/plain",
-                        b"Node lease belongs to another renderer document.",
-                    );
-                }
-            }
-            if request["operation"] == "attach" {
-                return response(
-                    stream,
-                    200,
-                    "application/json",
-                    br#"{"success":true,"data":{}}"#,
-                );
-            }
-            let result = self.node.module_request(request);
-            let body = match result {
-                Ok(value) => json!({"success":true,"data":value}),
-                Err(NodeError::Preload(error)) => {
-                    json!({"success":false,"error":{"name":error.name,"message":error.message,"code":error.code}})
-                }
-                Err(NodeError::Busy) => {
-                    json!({"success":false,"error":{"name":"Error","code":"RDESKTOP_NODE_BUSY","message":"Node runtime is busy; this operation did not begin."}})
-                }
-                Err(error) => {
-                    json!({"success":false,"error":{"name":"Error","message":error.to_string()}})
-                }
-            };
-            return response(stream, 200, "application/json", &serde_json::to_vec(&body)?);
+            let (status, body) = module_reply(
+                &self.node,
+                &self.origin,
+                &self.token,
+                &self.document,
+                headers.get("origin").copied().unwrap_or_default(),
+                headers.get("x-rdesktop-node").copied().unwrap_or_default(),
+                headers
+                    .get("x-rdesktop-document")
+                    .copied()
+                    .unwrap_or_default(),
+                request,
+            );
+            return response(
+                stream,
+                status,
+                "application/json",
+                &serde_json::to_vec(&body)?,
+            );
         }
         if method != "GET" {
             return response(
@@ -423,5 +518,93 @@ mod tests {
         for path in ["a%00", "%5Csecret", "C%3A/file", "%z0", "%FF", "a%"] {
             assert!(decode_path(path).is_none());
         }
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly pinned local Node executable"]
+    fn externally_hosted_sessions_keep_the_origin_capability_and_document_gate() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("preload.cjs"),
+            "window.nodeDocument=document.nodeType;",
+        )
+        .unwrap();
+        let session = RendererModules::start(
+            NodeConfig {
+                executable: std::env::var_os("RDESKTOP_TEST_NODE").unwrap().into(),
+                executable_sha256: std::env::var("RDESKTOP_TEST_NODE_SHA256").unwrap(),
+                package_root: root.path().into(),
+                preload: root.path().join("preload.cjs"),
+                timeout: Duration::from_secs(3),
+            },
+            "http://127.0.0.1:45678/v1/owned/",
+        )
+        .unwrap();
+        let doc = "11111111111111111111111111111111";
+        assert_eq!(
+            session
+                .respond(
+                    "https://unrelated.example",
+                    &session.token,
+                    doc,
+                    json!({"operation":"attach"})
+                )
+                .0,
+            403
+        );
+        assert_eq!(
+            session
+                .respond(&session.origin, "wrong", doc, json!({"operation":"attach"}))
+                .0,
+            403
+        );
+        assert_eq!(
+            session
+                .respond(
+                    &session.origin,
+                    &session.token,
+                    doc,
+                    json!({"operation":"events"})
+                )
+                .0,
+            403
+        );
+        assert_eq!(
+            session
+                .respond(
+                    &session.origin,
+                    &session.token,
+                    doc,
+                    json!({"operation":"attach"})
+                )
+                .0,
+            200
+        );
+        assert_eq!(
+            session
+                .respond(
+                    &session.origin,
+                    &session.token,
+                    "22222222222222222222222222222222",
+                    json!({"operation":"attach"})
+                )
+                .0,
+            403
+        );
+        let response = session.respond(
+            &session.origin,
+            &session.token,
+            doc,
+            json!({"operation":"preload"}),
+        );
+        assert_eq!(response.0, 200);
+        assert!(response.1["data"]["source"]
+            .as_str()
+            .unwrap()
+            .contains("document.nodeType"));
+        assert!(session
+            .initialization_script()
+            .contains("http://127.0.0.1:45678/v1/owned/"));
     }
 }
