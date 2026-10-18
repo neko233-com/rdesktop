@@ -16,8 +16,16 @@ use std::{
 };
 
 const LOADER: &str = include_str!("renderer.js");
+const BUFFER_FACTORY: &str = include_str!("buffer.js");
 const MAX_BODY: usize = 4 * 1024 * 1024;
 const MAX_ASSET: u64 = 16 * 1024 * 1024;
+
+fn renderer_script(options: &Value) -> String {
+    format!(
+        "({})({options});",
+        LOADER.replace("__RDESKTOP_BUFFER_FACTORY__", BUFFER_FACTORY)
+    )
+}
 
 /// Controls implicit Node globals in page scripts. Preloads and CommonJS
 /// dependencies retain lexical Node globals in either mode. This is a loading
@@ -95,12 +103,12 @@ impl RendererModules {
             .filter(|token| token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .ok_or_else(|| NodeError::Protocol("invalid renderer capability".into()))?
             .to_owned();
-        let options = json!({"base":base_url,"token":token,"preload":metadata["preload"],"node":metadata["node"],"exposeNodeGlobals":globals == NodeGlobals::Page});
+        let options = json!({"base":base_url,"token":token,"preload":metadata["preload"],"node":metadata["node"],"buffer":metadata["buffer"],"exposeNodeGlobals":globals == NodeGlobals::Page});
         Ok(Self {
             node,
             origin,
             token,
-            script: format!("({LOADER})({options});"),
+            script: renderer_script(&options),
             document: Mutex::new(None),
         })
     }
@@ -220,8 +228,8 @@ impl RendererBridge {
             "{origin}{prefix}{}",
             relative.to_string_lossy().replace('\\', "/")
         );
-        let options = json!({"base": format!("{origin}{prefix}"), "token":token,"preload":metadata["preload"],"node":metadata["node"],"exposeNodeGlobals":globals == NodeGlobals::Page});
-        let script = format!("({LOADER})({options});");
+        let options = json!({"base": format!("{origin}{prefix}"), "token":token,"preload":metadata["preload"],"node":metadata["node"],"buffer":metadata["buffer"],"exposeNodeGlobals":globals == NodeGlobals::Page});
+        let script = renderer_script(&options);
         let service = Arc::new(Service {
             root,
             prefix,

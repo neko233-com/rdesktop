@@ -26,6 +26,33 @@ window.runChecks=async()=>{
   await new Promise(resolve=>setTimeout(resolve,50));checks.event=event==='节点事件';
   checks.child=await new Promise((resolve,reject)=>require('node:child_process').execFile(process.execPath,['-e','process.stdout.write("real-node-child")'],(error,stdout)=>error?reject(error):resolve(stdout==='real-node-child')));
   checks.realNode=!!process.versions.node&&process.versions.electron===undefined;
+  checks.customErrorNames=['constructor','__proto__','CustomPluginError'].every(name=>{try{require('node:vm').runInNewContext(`(()=>{const e=new Error('owned-error');e.name=${JSON.stringify(name)};throw e;})()`);return false;}catch(error){return error instanceof Error&&error.name===name;}});
   checks.domCallback=document.querySelector('#message').value===text;
   return{checks,passed:Object.values(checks).every(value=>value===true),node:process.versions.node,electron:process.versions.electron??null};
+};
+window.runBufferCases=()=>require('./buffer-cases.cjs')(Buffer);
+window.runTransportChecks=async()=>{
+  const checks={},send=XMLHttpRequest.prototype.send,append=fs.appendFileSync,read=fs.readFileSync;
+  const target=path.join(__dirname,'transport-replay.txt');fs.writeFileSync(target,'');
+  let lost=false,calls=0;
+  try{
+    const b=Buffer.from([1,2,3,4]);
+    const pending=new Promise((resolve,reject)=>fs.readFile(target,(error,value)=>error?reject(error):resolve(Buffer.isBuffer(value))));
+    XMLHttpRequest.prototype.send=function(body){const request=JSON.parse(body);if(request.operation==='buffer')calls++;const result=send.call(this,body);if(request.operation==='buffer'&&!lost){lost=true;throw new DOMException('Injected lost Buffer response after execution','NetworkError');}return result;};
+    checks.bufferReplyLost=b.fill(7)===b&&Array.from(b).every(value=>value===7)&&lost&&calls===2;
+    XMLHttpRequest.prototype.send=send;
+    checks.bufferReplyPreservesPendingCallback=await pending;
+    lost=false;calls=0;
+    XMLHttpRequest.prototype.send=function(body){const request=JSON.parse(body);if(request.operation==='call')calls++;const result=send.call(this,body);if(request.operation==='call'&&!lost){lost=true;throw new DOMException('Injected lost append response after execution','NetworkError');}return result;};
+    try{append(target,'x');checks.appendThrows=false;}catch(error){checks.appendThrows=error.name==='NetworkError';}
+    XMLHttpRequest.prototype.send=send;
+    checks.appendNotReplayed=calls===1&&read(target,'utf8')==='x';
+  }finally{XMLHttpRequest.prototype.send=send;}
+  return checks;
+};
+window.runFastBufferChecks=()=>{
+  const b=Buffer.alloc(8),send=XMLHttpRequest.prototype.send;let requests=0,total=0;
+  try{XMLHttpRequest.prototype.send=function(...args){requests++;return send.apply(this,args);};for(let index=0;index<100000;index++){b.writeUInt32LE(index,0);total+=b.readUInt32LE(0);}}
+  finally{XMLHttpRequest.prototype.send=send;}
+  return {numericResult:total===4999950000,noIpcInNumericLoop:requests===0};
 };

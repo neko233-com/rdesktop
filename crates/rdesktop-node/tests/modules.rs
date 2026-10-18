@@ -144,6 +144,45 @@ fn real_async_callbacks_and_promises_use_the_scoped_event_queue() {
 
 #[test]
 #[ignore = "requires an explicitly pinned local Node executable"]
+fn copied_buffer_commands_preserve_aliases_and_leave_callbacks_for_polling() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("preload.cjs"), "").unwrap();
+    fs::write(root.path().join("callback.txt"), "buffer-callback").unwrap();
+    let node = NodeRuntime::start_modules(config(root.path())).unwrap();
+    let view = |id, offset, length| json!({"$buffer":"view","backing":0,"id":id,"offset":offset,"length":length,"type":"Buffer"});
+    let result = node.module_request(json!({"operation":"buffer","kind":"method","name":"copy","receiver":view(0,0,4),"args":[view(1,2,4)],"backings":["AQIDBAUG"]})).unwrap();
+    assert_eq!(result["value"], 4);
+    assert_eq!(result["changes"][0]["base64"], "AQIBAgME");
+    let fs_module = node
+        .module_request(
+            json!({"operation":"resolve","name":"fs","parent":root.path().join("preload.cjs")}),
+        )
+        .unwrap()["value"]
+        .clone();
+    call(&node, &get(&node, &fs_module, "readFile"), json!([root.path().join("callback.txt"),{"$rdesktop":"callback","id":"buffer-preserves-callback"}])).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let result = node.module_request(json!({"operation":"buffer","kind":"method","name":"fill","receiver":view(0,0,4),"args":[7],"backings":["AQIDBA=="]})).unwrap();
+    assert_eq!(result["value"], json!({"$buffer":"same","id":0}));
+    assert_eq!(result["changes"][0]["base64"], "BwcHBw==");
+    assert_eq!(result["events"], json!([]));
+    let events = node.module_request(json!({"operation":"events"})).unwrap();
+    assert!(events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["id"] == "buffer-preserves-callback"));
+    for invalid in [
+        json!({"$rdesktop":"callback","id":"rejected"}),
+        json!({"$rdesktop":"reference","id":"1"}),
+    ] {
+        let rejected = node.module_request(json!({"operation":"buffer","kind":"method","name":"fill","receiver":view(0,0,4),"args":[invalid],"backings":["AQIDBA=="]}));
+        assert!(matches!(rejected, Err(NodeError::Preload(error)) if error.name == "TypeError"));
+    }
+    node.close().unwrap();
+}
+
+#[test]
+#[ignore = "requires an explicitly pinned local Node executable"]
 fn private_renderer_origin_rejects_other_origins_methods_and_paths_and_closes() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("preload.cjs"), "").unwrap();

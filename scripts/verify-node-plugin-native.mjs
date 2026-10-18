@@ -1,7 +1,7 @@
 // Windows native acceptance. No Electron/CDP replacement renderer is launched.
 // node scripts/verify-node-plugin-native.mjs fixture OUTPUT [--headless]
 // node scripts/verify-node-plugin-native.mjs public OUTPUT IMMUTABLE_PUBLIC_PACKAGE
-import fs from 'node:fs/promises';import {spawn,execFileSync} from 'node:child_process';import {createHash,randomUUID} from 'node:crypto';import {join,resolve,relative,isAbsolute} from 'node:path';import {fileURLToPath} from 'node:url';import {setTimeout as delay} from 'node:timers/promises';import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';import {spawn,execFileSync} from 'node:child_process';import {createHash,randomUUID} from 'node:crypto';import {join,resolve,relative,isAbsolute} from 'node:path';import {fileURLToPath} from 'node:url';import {isDeepStrictEqual} from 'node:util';import {setTimeout as delay} from 'node:timers/promises';import assert from 'node:assert/strict';
 assert.equal(process.platform,'win32','Windows x64 is the current native acceptance platform');assert.equal(process.arch,'x64');
 const repo=fileURLToPath(new URL('../',import.meta.url));
 const [mode,outputArgument,...rest]=process.argv.slice(2),hidden=rest.includes('--headless'),preloadOnly=rest.includes('--preload-only');
@@ -12,7 +12,7 @@ assert(!(mode==='public'&&hidden),'The public plugin UIA input/invoke acceptance
 const output=resolve(outputArgument),location=relative(repo,output);assert(isAbsolute(location)||location==='..'||location.startsWith('..\\')||location.startsWith('../'),'QA output must be outside the repository');await fs.mkdir(output,{recursive:true});
 const runRoot=join(output,`${mode}-${hidden?'hidden':'visible'}-${randomUUID()}`);await fs.mkdir(runRoot);
 const packageRoot=mode==='public'?resolve(publicPackage):join(runRoot,'package');
-if(mode!=='public'){await fs.mkdir(packageRoot);for(const file of ['index.html','preload.cjs','helper.cjs','cycle-a.cjs','cycle-b.cjs','late.cjs','shadow.cjs'])await fs.copyFile(join(repo,'examples/node_plugin/fixtures',file),join(packageRoot,file));}
+if(mode!=='public'){await fs.mkdir(packageRoot);for(const file of ['index.html','preload.cjs','helper.cjs','cycle-a.cjs','cycle-b.cjs','late.cjs','shadow.cjs','buffer-cases.cjs'])await fs.copyFile(join(repo,'examples/node_plugin/fixtures',file),join(packageRoot,file));}
 const nodeExe=process.env.RDESKTOP_TEST_NODE;assert(nodeExe);const nodeSha=createHash('sha256').update(await fs.readFile(nodeExe)).digest('hex');assert.equal(nodeSha,process.env.RDESKTOP_TEST_NODE_SHA256,'Explicitly pin the selected Node binary');
 const sessionFile=join(runRoot,'session.json');const executable=process.env.RDESKTOP_PLUGIN_FIXTURE_EXE||join(repo,'target/debug/node_plugin.exe');
 const snapshot=()=>JSON.parse(execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command','Get-CimInstance Win32_Process | Select-Object Name,ProcessId,ParentProcessId | ConvertTo-Json -Compress'],{windowsHide:true,encoding:'utf8'}));
@@ -50,8 +50,17 @@ try{
   await req('action',{action:'click',selector:'#run'});
   const result=await until(async()=>{const failure=await evaluate('window.failure??null');if(failure)throw Error(failure);return evaluate('window.result?.checks?window.result:null');},'actual Node/CommonJS/DOM checks');
   assert(result.passed,JSON.stringify(result));
+  const expectedBuffers=JSON.parse(execFileSync(nodeExe,[join(packageRoot,'buffer-cases.cjs')],{encoding:'utf8',windowsHide:true}));
+  const actualBuffers=await evaluate('window.runBufferCases()');
+  await fs.writeFile(join(runRoot,'buffer-reference.json'),JSON.stringify(expectedBuffers,null,2));await fs.writeFile(join(runRoot,'buffer-native.json'),JSON.stringify(actualBuffers,null,2));
+  const bufferDifferences=actualBuffers.filter((item,index)=>!isDeepStrictEqual(item,expectedBuffers[index]));
+  assert.equal(actualBuffers.length,expectedBuffers.length);assert.equal(bufferDifferences.length,0,'Buffer behavior differs from pinned Node: '+bufferDifferences.slice(0,12).map(item=>item.name).join(', '));
+  console.log(JSON.stringify({bufferCases:actualBuffers.length,bufferDifferences:bufferDifferences.length}));
+  const transportChecks=await evaluate('window.runTransportChecks()');assert(Object.values(transportChecks).every(Boolean),JSON.stringify(transportChecks));
+  const fastBufferChecks=await evaluate('window.runFastBufferChecks()');assert(Object.values(fastBufferChecks).every(Boolean),JSON.stringify(fastBufferChecks));
+  await fs.writeFile(join(runRoot,'buffer-transport.json'),JSON.stringify(transportChecks,null,2));
   if(!hidden){const response=await fetch(session.url+'/__rdesktop__/agent/native-screenshot',{method:'POST',headers:{authorization:'Bearer '+session.token,'content-type':'application/json'},body:JSON.stringify({window})});assert(response.ok);await fs.writeFile(join(runRoot,'native.png'),Buffer.from(await response.arrayBuffer()));}
-  await fs.writeFile(join(runRoot,'proof.json'),JSON.stringify({mode,hidden,status,pageGlobals,ownedProcesses,result},null,2));console.log(JSON.stringify(result));
+  await fs.writeFile(join(runRoot,'proof.json'),JSON.stringify({mode,hidden,status,pageGlobals,ownedProcesses,result,bufferComparison:{cases:actualBuffers.length,differences:bufferDifferences.length,transportChecks,fastBufferChecks}},null,2));console.log(JSON.stringify(result));
  }
  console.log(JSON.stringify({output:runRoot,mode,hidden,passed:true}));
 }catch(error){

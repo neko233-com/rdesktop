@@ -84,11 +84,82 @@ function createModuleRuntime(root, preload) {
     if (fs.statSync(filename).size > 1024 * 1024) throw new RangeError('CommonJS source exceeds 1 MiB.');
     return { kind: path.extname(filename) === '.json' ? 'json' : 'source', filename, source: fs.readFileSync(filename, 'utf8') };
   }
+  function bufferCatalog(target) {
+    const functions = new Map();
+    return Object.getOwnPropertyNames(target).flatMap(name => {
+      const descriptor = Object.getOwnPropertyDescriptor(target, name);
+      if (name === 'constructor' || typeof descriptor.value !== 'function') return [];
+      const alias = functions.get(descriptor.value); functions.set(descriptor.value, alias || name);
+      return [{ name, functionName: descriptor.value.name, arity: descriptor.value.length, enumerable: descriptor.enumerable, ...(alias ? { alias } : {}) }];
+    });
+  }
+  const bufferApi = { statics: bufferCatalog(Buffer), methods: bufferCatalog(Buffer.prototype), poolSize: Buffer.poolSize };
+  const bufferFunctions = new Map(['static', 'method'].flatMap(kind => {
+    const target = kind === 'static' ? Buffer : Buffer.prototype;
+    return Object.getOwnPropertyNames(target).flatMap(name => {
+      const value = Object.getOwnPropertyDescriptor(target, name).value;
+      return name !== 'constructor' && typeof value === 'function' ? [[kind + ':' + name, value]] : [];
+    });
+  }));
+  if (typeof require('node:buffer').SlowBuffer === 'function') bufferFunctions.set('module:SlowBuffer', require('node:buffer').SlowBuffer);
+  function bufferOperation(message) {
+    const operation = bufferFunctions.get(message.kind + ':' + message.name);
+    if (!operation
+      || !Array.isArray(message.backings) || message.backings.length > 4096
+      || !Array.isArray(message.args) || message.args.length > 256) throw new TypeError('Invalid Buffer operation.');
+    const buffers = message.backings.map(base64 => {
+      if (typeof base64 !== 'string') throw new TypeError('Invalid Buffer backing store.');
+      const bytes = Buffer.from(base64, 'base64'), store = Buffer.from(new ArrayBuffer(bytes.length));
+      store.set(bytes); return store;
+    });
+    const originals = buffers.map(value => Buffer.from(value)), objects = new Map(), identities = new WeakMap();
+    const types = { Uint8Array, Uint8ClampedArray, Int8Array, Uint16Array, Int16Array, Uint32Array, Int32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array, DataView };
+    function decode(value, depth = 0) {
+      if (depth > 32) throw new RangeError('Buffer argument nesting limit reached.');
+      if (Array.isArray(value)) return value.map(item => decode(item, depth + 1));
+      if (!value || typeof value !== 'object') return value;
+      if (value.$buffer === 'view' || value.$buffer === 'array-buffer') {
+        const source = buffers[value.backing]; if (!source) throw new RangeError('Unknown Buffer backing store.');
+        let result;
+        if (value.$buffer === 'array-buffer') result = source.buffer;
+        else if (value.type === 'Buffer') result = Buffer.from(source.buffer, source.byteOffset + value.offset, value.length);
+        else { const Type = types[value.type]; if (!Type) throw new TypeError('Unsupported Buffer argument view.'); result = new Type(source.buffer, source.byteOffset + value.offset, value.length); }
+        if (objects.has(value.id)) return objects.get(value.id);
+        objects.set(value.id, result); identities.set(result, value.id); return result;
+      }
+      if (value.$buffer === 'object') {
+        const result = value.nullPrototype ? Object.create(null) : {};
+        if (!Array.isArray(value.entries) || value.entries.length > 4096) throw new RangeError('Buffer object exceeds its limit.');
+        for (const [key, item] of value.entries) Object.defineProperty(result, key, { value: decode(item, depth + 1), enumerable: true });
+        return result;
+      }
+      if (value.$buffer === 'symbol') return Symbol(value.description);
+      if (!['undefined', 'bigint', 'number'].includes(value.$rdesktop)) throw new TypeError('Buffer commands accept copied data only.');
+      return unpack(value);
+    }
+    const receiver = message.kind === 'method' ? decode(message.receiver) : Buffer;
+    const args = message.args.map(value => decode(value));
+    const result = Reflect.apply(operation, receiver, args);
+    let value;
+    if (result && typeof result === 'object' && identities.has(result)) value = { $buffer: 'same', id: identities.get(result) };
+    else if (Buffer.isBuffer(result)) {
+      const backing = buffers.findIndex(store => store.buffer === result.buffer && result.byteOffset >= store.byteOffset && result.byteOffset + result.length <= store.byteOffset + store.length);
+      value = backing < 0 ? pack(result) : { $buffer: 'result-view', backing, offset: result.byteOffset - buffers[backing].byteOffset, length: result.length };
+    } else if (result && typeof result === 'object') value = { $buffer: 'json', value: JSON.parse(JSON.stringify(result)) };
+    else value = pack(result);
+    return { value, changes: buffers.flatMap((store, backing) => store.equals(originals[backing]) ? [] : [{ backing, base64: store.toString('base64') }]) };
+  }
   return { request(message) {
     if (!message || typeof message.operation !== 'string') throw new TypeError('Invalid module operation.');
     let value;
     switch (message.operation) {
-      case 'bootstrap': return { preload, root, node: process.versions.node, token: require('node:crypto').randomBytes(32).toString('hex') };
+      case 'bootstrap': return { preload, root, node: process.versions.node, buffer: bufferApi, token: require('node:crypto').randomBytes(32).toString('hex') };
+      // Copy-only commands are replayable after a lost HTTP reply. Leave async
+      // events for the normal event transport instead of consuming them here.
+      case 'buffer': {
+        if (overflow) throw new RangeError('Renderer event queue overflowed; close this runtime.');
+        return { ...bufferOperation(message), events: [] };
+      }
       case 'resolve': return resolve(message.name, message.parent);
       case 'preload': return resolve('./' + path.basename(preload), preload);
       case 'get': value = pack(Reflect.get(get(message.id), message.key), 0, new Set(), message.id); break;

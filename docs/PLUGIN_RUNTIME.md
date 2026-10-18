@@ -102,9 +102,28 @@ references, 256 renderer callbacks and 256 queued events; renderer worker calls
 must use deadlines of at most five seconds. HTTP headers/body have a five-second
 total read deadline. Node references use browser GC release hints, callbacks and
 Promises return through a scoped event queue, and errors preserve name/code.
-Buffer results are real browser `Uint8Array` values with a partial Buffer facade.
-The facade covers the measured encoding/transfer contracts, not every Node Buffer
-method. A full authority plugin is not a filesystem or subprocess sandbox.
+Buffer results are browser `Uint8Array` values with a Buffer facade shared by
+the lexical `Buffer` and `require('buffer').Buffer`. The selected Node executable
+supplies the method catalog, signatures, encoding/argument validation and slow
+operations. Common allocation, byte views and valid integer/float/BigInt reads
+and writes execute in the document. Slice/subarray preserve shared backing
+stores; copy/fill/swap operations preserve overlapping aliases and update the
+original document buffers. Small views transfer their required backing region,
+including alignment, instead of the entire allocation. TypeError and RangeError
+preserve their native JavaScript classes and Node error codes.
+
+Buffer RPC accepts copied data only, with no callbacks or Node references. It
+uses captured built-in functions, leaves pending async events for polling, and
+publishes byte changes only after a complete reply. A single NetworkError retry
+is therefore allowed for these copy-only commands. Other Node operations retain
+the no-replay contract, including after a file write's response is lost.
+Fault-injection checks verify both cases and preservation of a pending callback.
+
+This is measured compatibility, not a claim of every Buffer/Node behavior. Node
+allocation-pool identity/layout, arbitrary prototype overrides, SharedArrayBuffer
+and mutation of Buffer arguments by other native Node APIs remain migration
+gates. RPC frames still have the 4 MiB bound. A full authority plugin is not a
+filesystem or subprocess sandbox.
 
 `RendererModules::start_with_globals(config, base_url, NodeGlobals::PreloadOnly)`
 and `RendererBridge::start_with_globals` select a preload-only loading policy.
@@ -145,14 +164,25 @@ descriptors/mutation, byte buffers, DOM closures and a real hidden Node child.
 Both modes inspect the actual owned process tree for Node and WebView2, reject
 Electron descendants, and require the owned Node worker to exit normally.
 
-Windows x64 acceptance on 2026-10-18 used Node 24.19.0. The current fixture passed
-23 checks, including lazy modules and lexical global boundaries, in visible and
+Windows x64 acceptance on 2026-10-19 used Node 24.19.0. The current fixture passed
+24 checks, including lazy modules, lexical global boundaries and custom error
+names, in visible and
 hidden native windows with the preload-only policy, plus the default page-global
 policy. The original public package also passed the preload-only policy and
 passed UIA Value/Invoke, label relation, byte-preservation and real mkdir checks.
 The accepted-socket fix also passed eight consecutive native fixture runs. The
-21 explicit Node tests (including the externally hosted session gate) and the full
+22 explicit Node tests (including the externally hosted session and copy-only
+Buffer gates) and the full
 workspace's native-agent build/test/clippy checks passed.
+
+The identical Buffer case functions also ran against the explicitly pinned Node
+executable and the real native WebView2 facade: 414 cases matched, including
+numeric boundaries, encoding edge cases, method aliases/signatures, coercion,
+overlapping copy/fill, shared views, legacy constructors, and a small view on an
+8 MiB backing store. The visible, hidden and page-global modes passed. A
+100000-iteration numeric read/write loop returned the expected sum with zero
+IPC requests. Full reference/native results and transport-fault proofs are saved
+by `verify-node-plugin-native.mjs` outside the repository.
 
 The release example additionally passed the same 18 checks through real Windows
 accessibility input. It contained no Agent/session/headless/UIA debug markers,

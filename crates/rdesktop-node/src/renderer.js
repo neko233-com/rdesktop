@@ -12,7 +12,8 @@ function rdesktopNodeRenderer(options) {
     if (count) retained.set(id, count); else { retained.delete(id); released.add(id); }
   });
   function retain(value, id, key) { retained.set(id, (retained.get(id) || 0) + 1); released.delete(id); finalizer.register(value, { id, key }); }
-  function error(info) { const result = new Error(info?.message || 'Node operation failed.'); result.name = info?.name || 'Error'; if (info?.code) result.code = info.code; return result; }
+  const errorTypes = new Map(Object.entries({ Error, TypeError, RangeError, ReferenceError, SyntaxError, EvalError, URIError }));
+  function error(info) { const Type = errorTypes.get(info?.name) || Error; const result = new Type(info?.message || 'Node operation failed.'); result.name = info?.name || 'Error'; if (info?.code) result.code = info.code; return result; }
   function report(cause) { console.error('rdesktop Node renderer:', cause); window.dispatchEvent(new CustomEvent('rdesktop-node-error', { detail: { name: cause.name, message: cause.message } })); }
   function events(items) {
     for (const event of items || []) {
@@ -23,10 +24,18 @@ function rdesktopNodeRenderer(options) {
   function rpc(request) {
     if (closed) throw terminalError || new Error('The renderer Node lease is closed.');
     const end = Date.now() + 500;
+    let replayedBuffer = false;
     for (;;) {
       const xhr = new XMLHttpRequest(); xhr.open('POST', options.base + '__node', false);
       xhr.setRequestHeader('Content-Type', 'application/json'); xhr.setRequestHeader('X-Rdesktop-Node', options.token); xhr.setRequestHeader('X-Rdesktop-Document', documentIdentity);
-      xhr.send(JSON.stringify(request));
+      try { xhr.send(JSON.stringify(request)); }
+      catch (cause) {
+        // Buffer commands accept copied data only, mutate private copies, and
+        // publish changes after a complete reply. Replaying a lost reply is safe.
+        // Ordinary Node calls may have external effects and are never replayed.
+        if (request.operation === 'buffer' && !replayedBuffer && cause.name === 'NetworkError') { replayedBuffer = true; continue; }
+        throw cause;
+      }
       if (xhr.status !== 200) throw new Error('Renderer Node transport rejected the request (' + xhr.status + ').');
       const result = JSON.parse(xhr.responseText);
       // Busy means no operation began; never retry a timeout or an unknown result.
@@ -52,43 +61,16 @@ function rdesktopNodeRenderer(options) {
     try { return Array.isArray(value) ? value.map(item => pack(item, seen)) : { $rdesktop: 'object', entries: Object.entries(value).map(([key, item]) => [key, pack(item, seen)]) }; }
     finally { seen.delete(value); }
   }
-  class RendererBuffer extends Uint8Array {
-    static from(value, encoding = 'utf8') {
-      if (typeof value !== 'string') { if (typeof value === 'number' || value == null) throw new TypeError('Invalid Buffer input.'); return new RendererBuffer(value); }
-      encoding = encoding.toLowerCase().replace('-', '');
-      if (encoding === 'hex') { const bytes = []; for (let index = 0; index + 1 < value.length; index += 2) { const pair = value.slice(index, index + 2); if (!/^[0-9a-f]{2}$/i.test(pair)) break; bytes.push(parseInt(pair, 16)); } return new RendererBuffer(bytes); }
-      if (encoding === 'base64' || encoding === 'base64url') return new RendererBuffer(Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/').replace(/\s/g, '')), char => char.charCodeAt(0)));
-      if (encoding === 'utf8') return new RendererBuffer(new TextEncoder().encode(value));
-      if (encoding === 'utf16le' || encoding === 'ucs2') { const result = new RendererBuffer(value.length * 2); for (let index = 0; index < value.length; index++) { result[index * 2] = value.charCodeAt(index) & 255; result[index * 2 + 1] = value.charCodeAt(index) >>> 8; } return result; }
-      if (['ascii', 'latin1', 'binary'].includes(encoding)) return new RendererBuffer(Array.from(value, char => char.charCodeAt(0) & 255));
-      throw new TypeError('Unsupported Buffer encoding: ' + encoding);
-    }
-    static alloc(length, fill = 0, encoding) { const result = new RendererBuffer(length); const bytes = typeof fill === 'string' ? RendererBuffer.from(fill, encoding) : typeof fill === 'number' ? [fill] : fill; if (bytes?.length) for (let i = 0; i < length; i++) result[i] = bytes[i % bytes.length]; return result; }
-    static allocUnsafe(length) { return RendererBuffer.alloc(length); }
-    static isBuffer(value) { return value instanceof RendererBuffer; }
-    static byteLength(value, encoding) { return typeof value === 'string' ? this.from(value, encoding).length : value.byteLength; }
-    static concat(values, length = values.reduce((total, value) => total + value.length, 0)) { const result = new RendererBuffer(length); let offset = 0; for (const value of values) { const part = value.subarray(0, Math.max(0, length - offset)); result.set(part, offset); offset += part.length; if (offset >= length) break; } return result; }
-    toString(encoding = 'utf8', start = 0, end = this.length) {
-      const bytes = this.subarray(Math.max(0, start), Math.min(this.length, end)); encoding = encoding.toLowerCase().replace('-', '');
-      if (encoding === 'utf8') return new TextDecoder().decode(bytes);
-      if (encoding === 'utf16le' || encoding === 'ucs2') return new TextDecoder('utf-16le').decode(bytes.subarray(0, bytes.length - bytes.length % 2));
-      if (encoding === 'hex') return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
-      let binary = ''; for (const byte of bytes) binary += String.fromCharCode(encoding === 'ascii' ? byte & 127 : byte);
-      if (encoding === 'base64' || encoding === 'base64url') { const result = btoa(binary); return encoding === 'base64url' ? result.replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '') : result; }
-      if (['ascii', 'latin1', 'binary'].includes(encoding)) return binary;
-      throw new TypeError('Unsupported Buffer encoding: ' + encoding);
-    }
-    slice(start, end) { return this.subarray(start, end); }
-    toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
-    equals(other) { return this.length === other.length && this.every((byte, index) => byte === other[index]); }
-  }
+  const bufferFacade = (__RDESKTOP_BUFFER_FACTORY__)({ rpc, pack, unpack, metadata: options.buffer });
+  const RendererBuffer = bufferFacade.Buffer;
+  let nativeBufferModule;
   function unpack(value, owner) {
     if (Array.isArray(value)) return value.map(item => unpack(item));
     if (value === null || typeof value !== 'object') return value;
     if (value.$rdesktop === 'undefined') return undefined;
     if (value.$rdesktop === 'bigint') return BigInt(value.value);
     if (value.$rdesktop === 'number') return Number(value.value);
-    if (value.$rdesktop === 'bytes') return RendererBuffer.from(value.base64, 'base64');
+    if (value.$rdesktop === 'bytes') return bufferFacade.decode(value.base64);
     if (value.$rdesktop === 'error') return error(value);
     if (value.$rdesktop !== 'reference') throw new TypeError('Invalid Node value tag.');
     if (value.kind === 'promise') {
@@ -137,7 +119,16 @@ function rdesktopNodeRenderer(options) {
     } catch (cause) { modules.delete(resolved.filename); throw cause; }
   }
   function makeRequire(parent) {
-    const require = name => load(rpc({ operation: 'resolve', name, parent }));
+    const require = name => {
+      if (name === 'buffer' || name === 'node:buffer') {
+        if (!nativeBufferModule) {
+          const native = load(rpc({ operation: 'resolve', name, parent }));
+          nativeBufferModule = new Proxy(native, { get(target, key) { return key === 'Buffer' ? RendererBuffer : key === 'SlowBuffer' ? bufferFacade.SlowBuffer : Reflect.get(target, key); } });
+        }
+        return nativeBufferModule;
+      }
+      return load(rpc({ operation: 'resolve', name, parent }));
+    };
     require.resolve = name => { const result = rpc({ operation: 'resolve', name, parent }); return result.filename || name; };
     return require;
   }
