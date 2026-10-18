@@ -19,6 +19,16 @@ const LOADER: &str = include_str!("renderer.js");
 const MAX_BODY: usize = 4 * 1024 * 1024;
 const MAX_ASSET: u64 = 16 * 1024 * 1024;
 
+/// Controls implicit Node globals in page scripts. Preloads and CommonJS
+/// dependencies retain lexical Node globals in either mode. This is a loading
+/// policy, not a sandbox: a preload may deliberately export Node authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NodeGlobals {
+    #[default]
+    Page,
+    PreloadOnly,
+}
+
 /// Opt-in bridge; it does not bundle Node, a browser, Electron or uTools APIs.
 /// The initial script loads the original preload into the page's JS context.
 pub struct RendererBridge {
@@ -51,6 +61,13 @@ pub struct RendererModules {
 
 impl RendererModules {
     pub fn start(config: NodeConfig, base_url: &str) -> Result<Self, NodeError> {
+        Self::start_with_globals(config, base_url, NodeGlobals::Page)
+    }
+    pub fn start_with_globals(
+        config: NodeConfig,
+        base_url: &str,
+        globals: NodeGlobals,
+    ) -> Result<Self, NodeError> {
         if config.timeout > Duration::from_secs(5) {
             return Err(NodeError::Configuration(
                 "renderer Node calls must use a deadline of at most 5000 ms".into(),
@@ -78,7 +95,7 @@ impl RendererModules {
             .filter(|token| token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .ok_or_else(|| NodeError::Protocol("invalid renderer capability".into()))?
             .to_owned();
-        let options = json!({"base":base_url,"token":token,"preload":metadata["preload"],"node":metadata["node"]});
+        let options = json!({"base":base_url,"token":token,"preload":metadata["preload"],"node":metadata["node"],"exposeNodeGlobals":globals == NodeGlobals::Page});
         Ok(Self {
             node,
             origin,
@@ -165,6 +182,13 @@ fn module_reply(
 
 impl RendererBridge {
     pub fn start(config: NodeConfig, entry: impl AsRef<Path>) -> Result<Self, NodeError> {
+        Self::start_with_globals(config, entry, NodeGlobals::Page)
+    }
+    pub fn start_with_globals(
+        config: NodeConfig,
+        entry: impl AsRef<Path>,
+        globals: NodeGlobals,
+    ) -> Result<Self, NodeError> {
         // Sync browser calls must have a short, explicit worker deadline.
         if config.timeout > Duration::from_secs(5) {
             return Err(NodeError::Configuration(
@@ -196,7 +220,7 @@ impl RendererBridge {
             "{origin}{prefix}{}",
             relative.to_string_lossy().replace('\\', "/")
         );
-        let options = json!({"base": format!("{origin}{prefix}"), "token":token,"preload":metadata["preload"],"node":metadata["node"]});
+        let options = json!({"base": format!("{origin}{prefix}"), "token":token,"preload":metadata["preload"],"node":metadata["node"],"exposeNodeGlobals":globals == NodeGlobals::Page});
         let script = format!("({LOADER})({options});");
         let service = Arc::new(Service {
             root,

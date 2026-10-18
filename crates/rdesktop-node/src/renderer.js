@@ -4,6 +4,7 @@ function rdesktopNodeRenderer(options) {
   const documentIdentity = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
   const references = new WeakMap(), proxies = new Map(), callbacks = new Map(), callbackIds = new WeakMap();
   const promises = new Map(), released = new Set(), retained = new Map(), modules = new Map();
+  let nodeProcess, nodeSetImmediate, nodeClearImmediate;
   let sequence = 0, closed = false, polling = false, terminalError = null;
   const finalizer = new FinalizationRegistry(({ id, key }) => {
     if (!proxies.get(key)?.deref()) proxies.delete(key);
@@ -125,7 +126,12 @@ function rdesktopNodeRenderer(options) {
         const require = makeRequire(resolved.filename);
         const dirname = resolved.filename.slice(0, Math.max(resolved.filename.lastIndexOf('/'), resolved.filename.lastIndexOf('\\')));
         const source = resolved.source.replace(/^#![^\n]*\n/, '');
-        new Function('require', 'module', 'exports', '__filename', '__dirname', source + '\n//# sourceURL=' + resolved.filename.replace(/[\r\n]/g, '')).call(module.exports, require, module, module.exports, resolved.filename, dirname);
+        // Keep Node globals in an outer lexical scope: adding wrapper arguments
+        // would change CommonJS arguments.length and reject a local `const process`.
+        const factory = new Function('process', 'Buffer', 'global', 'setImmediate', 'clearImmediate',
+          'return function(require,module,exports,__filename,__dirname){\n' + source + '\n};\n//# sourceURL=' + resolved.filename.replace(/[\r\n]/g, ''));
+        factory(nodeProcess, RendererBuffer, window, nodeSetImmediate, nodeClearImmediate)
+          .call(module.exports, require, module, module.exports, resolved.filename, dirname);
       }
       module.loaded = true; return module.exports;
     } catch (cause) { modules.delete(resolved.filename); throw cause; }
@@ -137,12 +143,20 @@ function rdesktopNodeRenderer(options) {
   }
   rpc({ operation: 'attach' });
   const require = makeRequire(options.preload);
+  nodeProcess = require('node:process');
+  const timers = require('node:timers');
+  nodeSetImmediate = timers.setImmediate;
+  nodeClearImmediate = timers.clearImmediate;
+  if (options.exposeNodeGlobals !== false) Object.defineProperties(window, {
+    require: { value: require, configurable: true, writable: true },
+    global: { value: window, configurable: true, writable: true },
+    Buffer: { value: RendererBuffer, configurable: true, writable: true },
+    process: { value: nodeProcess, configurable: true, writable: true },
+  });
   Object.defineProperties(window, {
-    require: { value: require, configurable: true },
-    global: { value: window, configurable: true },
-    Buffer: { value: RendererBuffer, configurable: true },
-    process: { value: require('node:process'), configurable: true },
-    __RDESKTOP_NODE_STATUS__: { value: Object.freeze({ node: options.node, renderer: 'native-webview', electron: false }), configurable: false },
+    setImmediate: { value: nodeSetImmediate, configurable: true, writable: true },
+    clearImmediate: { value: nodeClearImmediate, configurable: true, writable: true },
+    __RDESKTOP_NODE_STATUS__: { value: Object.freeze({ node: options.node, renderer: 'native-webview', electron: false, nodeGlobals: options.exposeNodeGlobals === false ? 'preload-only' : 'page' }), configurable: false },
   });
   const timer = setInterval(async () => {
     if (closed || polling) return; polling = true;

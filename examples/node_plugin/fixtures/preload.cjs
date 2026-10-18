@@ -1,8 +1,14 @@
 const fs=require('node:fs'),path=require('node:path');
 const helper=require('./helper.cjs'),cycle=require('./cycle-a.cjs');
 const loadedWithDocument=document.nodeType===9;
+const preloadEnvironment={process:!!process.versions.node,buffer:Buffer.from('预载').toString()==='预载',global:global===window,args:arguments.length===5};
 window.runChecks=async()=>{
   const checks={loadedWithDocument,commonjsCached:helper===require('./helper.cjs'),commonjsThis:helper.commonjsThis,cycle:cycle.value==='a:b:a'};
+  checks.preloadGlobals=Object.values(preloadEnvironment).every(Boolean);
+  checks.commonjsArguments=helper.commonjsArguments;
+  checks.lazyModuleGlobals=require('./late.cjs')();
+  checks.localGlobalShadowing=require('./shadow.cjs');
+  checks.immediate=await new Promise(resolve=>setImmediate(()=>resolve(true)));
   const target=path.join(__dirname,'真实 中文.txt'),text=document.querySelector('#message').value;
   fs.writeFileSync(target,text+' 中文');
   checks.sync=fs.readFileSync(target,'utf8')===text+' 中文';

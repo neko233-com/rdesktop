@@ -106,6 +106,18 @@ Buffer results are real browser `Uint8Array` values with a partial Buffer facade
 The facade covers the measured encoding/transfer contracts, not every Node Buffer
 method. A full authority plugin is not a filesystem or subprocess sandbox.
 
+`RendererModules::start_with_globals(config, base_url, NodeGlobals::PreloadOnly)`
+and `RendererBridge::start_with_globals` select a preload-only loading policy.
+Preloads and their CommonJS dependencies retain lexical `process`, `Buffer`,
+`global`, `setImmediate` and `clearImmediate`; page scripts do not implicitly
+receive `require`, `process`, `Buffer` or `global`. This prevents browser bundles
+from taking a Node branch merely because a preload needs Node. Explicit preload
+exports remain available. It is not a sandbox or a separate JavaScript world.
+The existing `start` methods keep the page-global policy for compatibility.
+Both policies preserve the CommonJS five-argument wrapper, top-level `this`,
+local declarations shadowing Node globals, and modules loaded after navigation
+has finished. Page-level `setImmediate` and `clearImmediate` remain available.
+
 Native verification is repeatable, with all evidence outside the checkout:
 
 ```powershell
@@ -114,6 +126,8 @@ $env:RDESKTOP_TEST_NODE_SHA256 = (Get-FileHash -LiteralPath $env:RDESKTOP_TEST_N
 cargo build -p node_plugin --features native-agent
 node scripts/verify-node-plugin-native.mjs fixture "$env:TEMP/rdesktop-node-acceptance"
 node scripts/verify-node-plugin-native.mjs fixture "$env:TEMP/rdesktop-node-acceptance" --headless
+node scripts/verify-node-plugin-native.mjs fixture "$env:TEMP/rdesktop-node-acceptance" --preload-only
+node scripts/verify-node-plugin-native.mjs fixture "$env:TEMP/rdesktop-node-acceptance" --preload-only --headless
 node scripts/verify-node-plugin-native.mjs public "$env:TEMP/rdesktop-node-acceptance" C:\path\to\immutable\utools-file-to-folder
 ```
 
@@ -132,10 +146,12 @@ Both modes inspect the actual owned process tree for Node and WebView2, reject
 Electron descendants, and require the owned Node worker to exit normally.
 
 Windows x64 acceptance on 2026-10-18 used Node 24.19.0. The current fixture passed
-18 checks in visible and hidden native windows; the original public package
+23 checks, including lazy modules and lexical global boundaries, in visible and
+hidden native windows with the preload-only policy, plus the default page-global
+policy. The original public package also passed the preload-only policy and
 passed UIA Value/Invoke, label relation, byte-preservation and real mkdir checks.
 The accepted-socket fix also passed eight consecutive native fixture runs. The
-20 explicit Node tests (including the four module/service tests) and the full
+21 explicit Node tests (including the externally hosted session gate) and the full
 workspace's native-agent build/test/clippy checks passed.
 
 The release example additionally passed the same 18 checks through real Windows

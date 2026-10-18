@@ -4,7 +4,10 @@ use rdesktop_core::{
     ipc::{FnIpcHandler, IpcMessage, IpcResponse},
     renderer::Renderer,
 };
-use rdesktop_node::{renderer::RendererBridge, NodeConfig};
+use rdesktop_node::{
+    renderer::{NodeGlobals, RendererBridge},
+    NodeConfig,
+};
 use rdesktop_webview::{NativeEvent, NativeWindowOptions, WebViewRenderer};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -13,7 +16,12 @@ fn main() -> anyhow::Result<()> {
         std::env::var_os("RDESKTOP_PLUGIN_ROOT")
             .ok_or_else(|| anyhow::anyhow!("select RDESKTOP_PLUGIN_ROOT"))?,
     );
-    let bridge = RendererBridge::start(
+    let globals = match std::env::var("RDESKTOP_PLUGIN_NODE_GLOBALS").as_deref() {
+        Ok("preload-only") => NodeGlobals::PreloadOnly,
+        Ok("page") | Err(_) => NodeGlobals::Page,
+        _ => anyhow::bail!("Node globals must be page or preload-only"),
+    };
+    let bridge = RendererBridge::start_with_globals(
         NodeConfig {
             executable: PathBuf::from(
                 std::env::var_os("RDESKTOP_TEST_NODE")
@@ -27,6 +35,7 @@ fn main() -> anyhow::Result<()> {
             timeout: Duration::from_secs(3),
         },
         std::env::var("RDESKTOP_PLUGIN_ENTRY").unwrap_or_else(|_| "index.html".into()),
+        globals,
     )?;
     let mut config = AppConfig::default();
     config.window.title = "rdesktop Native Node Plugin".into();
