@@ -27,6 +27,10 @@ pub struct NativeWindowOptions {
     pub native_drag_drop: bool,
     /// Keep remote/plugin browser partitions separate from the trusted host.
     pub data_directory: Option<std::path::PathBuf>,
+    /// Native child of an existing runtime window (Windows). Create as a child
+    /// from the start so Tao keeps WS_CHILD across show/hide and style changes.
+    /// The parent must belong to this runtime; arbitrary external HWNDs are denied.
+    pub parent_window: Option<u64>,
     pub setup: Option<WebViewSetup>,
 }
 

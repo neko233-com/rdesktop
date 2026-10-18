@@ -1086,6 +1086,24 @@ impl Renderer for WebViewRenderer {
                             window_builder = window_builder
                                 .with_max_inner_size(tao::dpi::LogicalSize::new(width, height));
                         }
+                        if let Some(parent_id) = initial_content.get(rdesktop_id).and_then(|c| c.0.parent_window) {
+                            #[cfg(windows)]
+                            {
+                                use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
+                                let parent = rdesktop_to_tao.get(&parent_id).and_then(|id| windows.get(id));
+                                let Some(parent) = parent else {
+                                    if let Some((_, reply)) = initial_content.remove(rdesktop_id) { let _ = reply.send(Err("native child parent is not a live runtime window".into())); }
+                                    continue;
+                                };
+                                window_builder = window_builder.with_parent_window(parent.window.hwnd());
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                let _ = parent_id;
+                                if let Some((_, reply)) = initial_content.remove(rdesktop_id) { let _ = reply.send(Err("native child windows require Windows acceptance".into())); }
+                                continue;
+                            }
+                        }
                         let window = match window_builder.build(event_loop_target) {
                             Ok(w) => w,
                             Err(e) => {

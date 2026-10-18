@@ -200,3 +200,18 @@ The public-preload test additionally verifies the original `preload.js` and
 `createCurrentFolder` with a fresh absolute temporary path. This is a preload
 execution result; its original HTML and uTools lifecycle have not passed the
 new runtime's native acceptance yet.
+
+## Native embedded documents on Windows
+
+`NativeWindowOptions.parent_window` accepts an existing window ID owned by the
+same `NativeRuntime`. An unknown or expired parent is rejected before creation.
+The window is created with Tao's child flag, preserving `WS_CHILD` across native
+show/hide and style updates. Converting an existing top-level window with
+`SetParent` alone does not establish that flag and can lose its native parent on
+the next show operation. Applications still own child bounds, document IPC,
+navigation policy and lifetime. Other platforms return an explicit unsupported
+error for this option until they have native acceptance coverage.
+
+Run `scripts/verify-native-child.mjs SESSION OUTPUT` against the `native_agent`
+example to exercise parent rejection, nested native accessibility, repeated
+show/hide/resize and child-only teardown in a real WebView2 window.

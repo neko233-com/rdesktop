@@ -100,7 +100,7 @@ fn main() -> anyhow::Result<()> {
             "native_dialog_status" => {
                 Ok(serde_json::json!({"result":result_for_handler.load(Ordering::Acquire)}))
             }
-            "second" => native
+            "second" | "child" => native
                 .create_window(
                     rdesktop_core::WindowConfig {
                         title: "rdesktop Secondary Agent".into(),
@@ -113,6 +113,16 @@ fn main() -> anyhow::Result<()> {
                             .clone()
                             .unwrap_or_else(|| "about:blank".into()),
                         ipc_enabled: true,
+                        parent_window: if msg.cmd == "child" {
+                            Some(
+                                msg.payload["parent"]
+                                    .as_str()
+                                    .and_then(|id| id.parse().ok())
+                                    .unwrap_or(0),
+                            )
+                        } else {
+                            None
+                        },
                         ..Default::default()
                     },
                 )
