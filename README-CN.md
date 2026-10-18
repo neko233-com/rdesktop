@@ -20,7 +20,7 @@ rdesktop 面向这样的桌面应用：界面使用 Web 技术构建，但开发
 
 ## 项目状态
 
-rdesktop 当前处于活跃开发的 `0.1.x` 阶段。浏览器开发服务器、Agent API、渲染器抽象和视觉调试工作流是当前版本线的重点；原生构建与安装包集成仍在持续完善，正式分发前请针对目标平台单独验证产物。
+rdesktop 当前处于活跃开发的 `0.1.x` 阶段。Windows 开发默认启动真实桌面应用，支持鉴权 Agent CLI、引擎输入、多窗口、截图和热重载。当前原生运行验收及二进制分发平台为 Windows 10/11 x64，其他平台需要单独运行验收。
 
 项目强调明确行为和可组合的 workspace，而不是将所有能力隐藏在单一运行时中。在 `1.0.0` 之前，公开 API 仍可能发生变化。
 
@@ -28,7 +28,7 @@ rdesktop 当前处于活跃开发的 `0.1.x` 阶段。浏览器开发服务器�
 
 大多数桌面 Web 框架主要优化两个目标之一：更小的包体，或最大的浏览器兼容性。rdesktop 关注第三个目标：让 Agent 驱动的开发过程始终可检查、可回放、可验证。
 
-- **开发阶段直接使用浏览器。** Agent 可以通过 HTTP 检查 DOM、查询元素、执行结构化操作并读取应用状态。
+- **开发阶段直接运行桌面应用。** Agent 通过鉴权本机接口检查真实 WebView2、执行引擎输入、读取 Rust IPC；`--headless` 隐藏启动相同原生窗口。
 - **保留原生渲染能力。** 同一个应用模型可以选择系统 WebView，或基于 Chromium 的渲染路径。
 - **验证用户真正看到的结果。** 原生截图和 Windows 桌面 MP4 录屏可以让人和 Agent 复核视觉回归与完整交互流程。
 - **显式表达平台行为。** 窗口状态、IPC、全局输入、快捷键、悬浮层、壁纸窗口和穿透点击都通过 Rust API 与配置表达。
@@ -61,7 +61,9 @@ Chromium 路径要求主机上存在兼容的 Chrome、Chromium 或 Edge 可执�
 
 ### 面向 Agent 的开发服务器
 
-`rdesktop dev` 会在普通浏览器中提供前端页面，并注入 rdesktop bridge。Agent 可以把它当作标准浏览器目标，同时仍然使用应用自己的 IPC 和交互模型。
+`rdesktop dev` 启动 Rust 桌面应用，通过 WebView2 内部 CDP 接口提供调试，不开放远程调试端口。`rdesktop dev --browser` 才启用独立浏览器预览及其 bridge。原生路径保留应用实际的 Rust IPC。
+
+无障碍接口提供完整引擎 AX 查询、同窗口 Windows UIA 快照、角色与名称定位、键盘操作和本地 axe 审计。隐藏窗口的引擎 AX 与 Windows UIA 分别报告；具体范围和人工读屏验收要求见[原生 Agent 文档](docs/NATIVE_AGENT.md)。
 
 开发服务器支持：
 
@@ -108,10 +110,12 @@ Windows 原生移动／缩放循环会派发一次 `rdesktop:window-move-resize-
 ### 安装 CLI
 
 ```bash
-npm install -g rdesktop
+npm install -g https://github.com/neko233-com/rdesktop/releases/download/v0.1.9/rdesktop-0.1.9.tgz
 # 也可从固定源码版本安装：
 cargo install --git https://github.com/neko233-com/rdesktop.git --tag v0.1.9 rdesktop-cli
 ```
+
+GitHub 的 npm 压缩包包含 Windows x64 CLI。npm registry 发布是独立步骤；该版本在 registry 可用后，也可用 `npm install -g rdesktop@0.1.9`。构建原生应用还需要 Rust MSVC 工具链、Windows SDK 和 WebView2 Runtime。
 
 ### 创建项目
 
@@ -128,17 +132,19 @@ cd hello-rdesktop
 rdesktop dev
 ```
 
-服务器默认监听 `http://localhost:1420` 并自动打开浏览器。要为 Agent 或 CI 运行无界面流程，可以关闭自动打开浏览器：
+Windows 下默认启动真实桌面应用，并为 `frontend/` 提供热重载。CLI 输出本机 Agent 会话文件路径。使用相同原生引擎但隐藏启动窗口：
 
 ```bash
-rdesktop dev --no-open
+rdesktop dev --headless
 ```
 
 常用 CLI 命令：
 
 ```text
 rdesktop init <name>                 创建项目骨架
-rdesktop dev [--path <dir>]         启动浏览器开发服务器
+rdesktop dev [--path <dir>]         启动原生应用、热重载与 Agent API
+rdesktop dev --browser --no-open    启动独立浏览器预览，不自动打开
+rdesktop agent --session <file> ... 检查或操作真实原生应用
 rdesktop build [--chrome]           构建原生应用路径
 rdesktop bundle --target <target>   生成平台 bundle
 rdesktop info                       查看 rdesktop.toml

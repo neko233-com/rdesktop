@@ -14,10 +14,9 @@ rdesktop is designed for desktop applications whose UI is built with web technol
 
 ## Terminal233 integration
 
-Terminal233 uses this repository as its rdesktop framework source. The client pins the exact git
-revision `01359a93b4337698ee4f43093f0c7bc78bb1b99a` for `rdesktop-core` and `rdesktop-webview`.
-The local working tree used for framework development is
-`C:\Users\14170\Desktop\Code\neko233-Projects\rdesktop`; do not edit Cargo's checkout cache.
+Terminal233 uses this repository as its rdesktop framework source. Applications
+should pin an explicit Git revision or immutable release tag for `rdesktop-core`
+and `rdesktop-webview`.
 
 Terminal233 has two intentionally interchangeable launch paths:
 
@@ -25,9 +24,8 @@ Terminal233 has two intentionally interchangeable launch paths:
 - the browser IDE path uses the same Terminal233 IDE components and the localhost Node `ssh2js`
   adapter, so layout, connection flow, terminal events, and SFTP contracts stay aligned.
 
-The current local desktop validation target is Windows `x86_64` only. Windows ARM64 is a future
-tag-only CI target and must not be produced locally until the user explicitly says “发布”. 32-bit
-Windows targets are permanently out of scope.
+The current validated native development and binary distribution target is
+Windows 10/11 x64. Other platforms require separate runtime acceptance.
 
 ## Project status
 
@@ -161,10 +159,15 @@ native mouse handling or client-area dimensions.
 ### Install the CLI
 
 ```bash
-npm install -g rdesktop
+npm install -g https://github.com/neko233-com/rdesktop/releases/download/v0.1.9/rdesktop-0.1.9.tgz
 # Or install the CLI from this immutable source release:
 cargo install --git https://github.com/neko233-com/rdesktop.git --tag v0.1.9 rdesktop-cli
 ```
+
+The GitHub npm tarball contains the Windows x64 CLI. The npm registry publication
+is a separate step; use `npm install -g rdesktop@0.1.9` when that version is
+available there. Building native applications also requires Rust MSVC, the
+Windows SDK and WebView2 Runtime.
 
 ### Create a project
 
