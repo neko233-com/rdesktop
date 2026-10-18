@@ -63,8 +63,8 @@ try{
   let actualMemory;
   if(hidden) actualMemory=await evaluate('window.runMemoryCases()');
   else {
-   const runMemory=(await req('uia',{max_nodes:2000})).nodes.find(node=>node.name==='Run native memory cases'&&node.control_type===50000);assert(runMemory);
-   await req('uia',{operation:'invoke',target:{runtime_id:runMemory.runtime_id}});
+   const runMemory=(await call('uia',{window:captureWindow,max_nodes:2000})).nodes.find(node=>node.name==='Run native memory cases'&&node.control_type===50000);assert(runMemory);
+   await call('uia',{window:captureWindow,operation:'invoke',target:{runtime_id:runMemory.runtime_id}});
    actualMemory=await until(async()=>{const failure=await evaluate('window.memoryFailure??null');assert(!failure,failure);return evaluate('window.memoryResult??null');},'native UIA memory result');
   }
   await fs.writeFile(join(runRoot,'memory-reference.json'),JSON.stringify(expectedMemory,null,2));await fs.writeFile(join(runRoot,'memory-native.json'),JSON.stringify(actualMemory,null,2));
@@ -72,11 +72,12 @@ try{
   assert.equal(actualMemory.length,expectedMemory.length);assert.equal(memoryDifferences.length,0,'Native memory behavior differs: '+memoryDifferences.map(item=>item.name).join(', '));
   console.log(JSON.stringify({memoryCases:actualMemory.length,memoryDifferences:memoryDifferences.length}));
   const privateTransportChecks=await evaluate('window.runPrivateTransportChecks()');assert(Object.values(privateTransportChecks).every(Boolean),JSON.stringify(privateTransportChecks));
+  const slowTransportChecks=await evaluate('window.runSlowTransportChecks()');assert(Object.values(slowTransportChecks).every(Boolean),JSON.stringify(slowTransportChecks));
   const transportChecks=await evaluate('window.runTransportChecks()');assert(Object.values(transportChecks).every(Boolean),JSON.stringify(transportChecks));
   const fastBufferChecks=await evaluate('window.runFastBufferChecks()');assert(Object.values(fastBufferChecks).every(Boolean),JSON.stringify(fastBufferChecks));
   await fs.writeFile(join(runRoot,'buffer-transport.json'),JSON.stringify(transportChecks,null,2));
   if(!hidden){const response=await fetch(session.url+'/__rdesktop__/agent/native-screenshot',{method:'POST',headers:{authorization:'Bearer '+session.token,'content-type':'application/json'},body:JSON.stringify({window:captureWindow})});assert(response.ok);await fs.writeFile(join(runRoot,'native.png'),Buffer.from(await response.arrayBuffer()));}
-  await fs.writeFile(join(runRoot,'proof.json'),JSON.stringify({mode,hidden,embedded,status,pageGlobals,ownedProcesses,result,idleTransportChecks,privateTransportChecks,memoryComparison:{cases:actualMemory.length,differences:memoryDifferences.length},bufferComparison:{cases:actualBuffers.length,differences:bufferDifferences.length,transportChecks,fastBufferChecks}},null,2));console.log(JSON.stringify(result));
+  await fs.writeFile(join(runRoot,'proof.json'),JSON.stringify({mode,hidden,embedded,status,pageGlobals,ownedProcesses,result,idleTransportChecks,privateTransportChecks,slowTransportChecks,memoryComparison:{cases:actualMemory.length,differences:memoryDifferences.length},bufferComparison:{cases:actualBuffers.length,differences:bufferDifferences.length,transportChecks,fastBufferChecks}},null,2));console.log(JSON.stringify(result));
  }
  console.log(JSON.stringify({output:runRoot,mode,hidden,passed:true}));
 }catch(error){

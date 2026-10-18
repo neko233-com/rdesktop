@@ -41,6 +41,22 @@ window.runPrivateTransportChecks=async()=>{
     return {immediate,callback};
   }finally{window.fetch=original;}
 };
+window.runSlowTransportChecks=async()=>{
+  const send=XMLHttpRequest.prototype.send,starts=[],ends=[];
+  try{
+    XMLHttpRequest.prototype.send=function(body){
+      const events=JSON.parse(body).operation==='events';
+      if(events)starts.push(performance.now());
+      const result=send.call(this,body);
+      if(events){const deadline=performance.now()+60;while(performance.now()<deadline){}ends.push(performance.now());}
+      return result;
+    };
+    const deadline=performance.now()+4000;
+    while(ends.length<3&&performance.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
+    const gaps=starts.slice(1).map((start,index)=>start-ends[index]);
+    return {receivedPolls:ends.length>=3,yieldsAfterSlowReply:gaps.length>=2&&gaps.every(gap=>gap>=15)};
+  }finally{XMLHttpRequest.prototype.send=send;}
+};
 window.runTransportChecks=async()=>{
   const checks={},send=XMLHttpRequest.prototype.send,append=fs.appendFileSync,read=fs.readFileSync;
   const target=path.join(__dirname,'transport-replay.txt');fs.writeFileSync(target,'');

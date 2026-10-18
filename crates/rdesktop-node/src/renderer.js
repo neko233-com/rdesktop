@@ -5,7 +5,7 @@ function rdesktopNodeRenderer(options) {
   const references = new WeakMap(), proxies = new Map(), callbacks = new Map(), callbackIds = new WeakMap();
   const promises = new Map(), released = new Set(), retained = new Map(), modules = new Map();
   let nodeProcess, nodeSetImmediate, nodeClearImmediate, memory;
-  const startInterval = window.setInterval.bind(window), stopInterval = window.clearInterval.bind(window);
+  const startTimer = window.setTimeout.bind(window), stopTimer = window.clearTimeout.bind(window);
   let sequence = 0, closed = false, polling = false, terminalError = null, timer = null;
   const finalizer = new FinalizationRegistry(({ id, key }) => {
     if (!proxies.get(key)?.deref()) proxies.delete(key);
@@ -156,8 +156,9 @@ function rdesktopNodeRenderer(options) {
     clearImmediate: { value: nodeClearImmediate, configurable: true, writable: true },
     __RDESKTOP_NODE_STATUS__: { value: Object.freeze({ node: options.node, renderer: 'native-webview', electron: false, nodeGlobals: options.exposeNodeGlobals === false ? 'preload-only' : 'page' }), configurable: false },
   });
-  function ensureEvents() { if (!closed && timer === null) timer = startInterval(pollEvents, 20); }
+  function ensureEvents() { if (!closed && !polling && timer === null) timer = startTimer(pollEvents, 20); }
   function pollEvents() {
+    timer = null;
     if (closed || polling) return; polling = true;
     try {
       const ids = [...released].slice(0, 4096); for (const id of ids) released.delete(id);
@@ -167,9 +168,12 @@ function rdesktopNodeRenderer(options) {
       // native child. The existing bounded RPC applies memory before callbacks.
       if (callbacks.size || promises.size) rpc({ operation: 'events' });
     } catch (cause) { if (!closed) { closed = true; terminalError = cause; for (const pending of promises.values()) pending.reject(cause); promises.clear(); report(cause); } }
-    finally { polling = false; if (closed || (!callbacks.size && !promises.size && !released.size)) { stopInterval(timer); timer = null; } }
+    // Start the delay after the previous bounded call returns. A fixed interval
+    // can already be overdue after a slow synchronous request and monopolize a
+    // native child's event loop. Leave time for painting, input and CDP work.
+    finally { polling = false; if (!closed && (callbacks.size || promises.size || released.size)) ensureEvents(); }
   }
-  window.addEventListener('pagehide', () => { closed = true; stopInterval(timer); timer = null; for (const pending of promises.values()) pending.reject(new Error('Renderer closed.')); promises.clear(); callbacks.clear(); }, { once: true });
+  window.addEventListener('pagehide', () => { closed = true; stopTimer(timer); timer = null; for (const pending of promises.values()) pending.reject(new Error('Renderer closed.')); promises.clear(); callbacks.clear(); }, { once: true });
   try { load(rpc({ operation: 'preload' })); }
   catch (cause) { report(cause); throw cause; }
 }
