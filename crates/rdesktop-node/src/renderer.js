@@ -4,7 +4,7 @@ function rdesktopNodeRenderer(options) {
   const documentIdentity = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
   const references = new WeakMap(), proxies = new Map(), callbacks = new Map(), callbackIds = new WeakMap();
   const promises = new Map(), released = new Set(), retained = new Map(), modules = new Map();
-  let nodeProcess, nodeSetImmediate, nodeClearImmediate;
+  let nodeProcess, nodeSetImmediate, nodeClearImmediate, memory;
   let sequence = 0, closed = false, polling = false, terminalError = null;
   const finalizer = new FinalizationRegistry(({ id, key }) => {
     if (!proxies.get(key)?.deref()) proxies.delete(key);
@@ -23,6 +23,8 @@ function rdesktopNodeRenderer(options) {
   }
   function rpc(request) {
     if (closed) throw terminalError || new Error('The renderer Node lease is closed.');
+    request = { ...request, rendererMemory: true };
+    if (memory && request.operation !== 'buffer') request.memory = memory.prepare(request);
     const end = Date.now() + 500;
     let replayedBuffer = false;
     for (;;) {
@@ -40,7 +42,10 @@ function rdesktopNodeRenderer(options) {
       const result = JSON.parse(xhr.responseText);
       // Busy means no operation began; never retry a timeout or an unknown result.
       if (!result.success) { if (result.error?.code === 'RDESKTOP_NODE_BUSY' && Date.now() < end) continue; throw error(result.error); }
-      events(result.data.events); return result.data;
+      memory?.accept(request.memory, result.data);
+      events(result.data.events);
+      if (result.data.thrown) throw error(result.data.thrown);
+      return result.data;
     }
   }
   function pack(value, seen = new Set()) {
@@ -54,8 +59,7 @@ function rdesktopNodeRenderer(options) {
       if (!id) { if (callbacks.size >= 256) throw new RangeError('Renderer callback limit reached.'); id = String(++sequence); callbackIds.set(value, id); callbacks.set(id, value); }
       return { $rdesktop: 'callback', id };
     }
-    if (value instanceof ArrayBuffer) value = new Uint8Array(value);
-    if (ArrayBuffer.isView(value)) { let binary = ''; for (const byte of new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) binary += String.fromCharCode(byte); return { $rdesktop: 'bytes', base64: btoa(binary) }; }
+    if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return memory.tag(value);
     if (seen.has(value) || seen.size > 32) throw new TypeError('Cyclic or excessively nested renderer values are unsupported.');
     seen.add(value);
     try { return Array.isArray(value) ? value.map(item => pack(item, seen)) : { $rdesktop: 'object', entries: Object.entries(value).map(([key, item]) => [key, pack(item, seen)]) }; }
@@ -63,6 +67,7 @@ function rdesktopNodeRenderer(options) {
   }
   const bufferFacade = (__RDESKTOP_BUFFER_FACTORY__)({ rpc, pack, unpack, metadata: options.buffer });
   const RendererBuffer = bufferFacade.Buffer;
+  memory = (__RDESKTOP_MEMORY_FACTORY__)(RendererBuffer);
   let nativeBufferModule;
   function unpack(value, owner) {
     if (Array.isArray(value)) return value.map(item => unpack(item));
@@ -71,6 +76,7 @@ function rdesktopNodeRenderer(options) {
     if (value.$rdesktop === 'bigint') return BigInt(value.value);
     if (value.$rdesktop === 'number') return Number(value.value);
     if (value.$rdesktop === 'bytes') return bufferFacade.decode(value.base64);
+    if (value.$rdesktop === 'memory-view' || value.$rdesktop === 'binary-view') return memory.unpack(value);
     if (value.$rdesktop === 'error') return error(value);
     if (value.$rdesktop !== 'reference') throw new TypeError('Invalid Node value tag.');
     if (value.kind === 'promise') {
@@ -154,10 +160,10 @@ function rdesktopNodeRenderer(options) {
     try {
       const ids = [...released].slice(0, 4096); for (const id of ids) released.delete(id);
       if (ids.length) rpc({ operation: 'release', ids });
-      const response = await fetch(options.base + '__node', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Rdesktop-Node': options.token, 'X-Rdesktop-Document': documentIdentity }, body: JSON.stringify({ operation: 'events' }) });
+      const response = await fetch(options.base + '__node', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Rdesktop-Node': options.token, 'X-Rdesktop-Document': documentIdentity }, body: JSON.stringify({ operation: 'events', rendererMemory: true }) });
       if (!response.ok) throw new Error('Node event transport failed.');
       const result = await response.json(); if (!result.success) { if (result.error?.code !== 'RDESKTOP_NODE_BUSY') throw error(result.error); }
-      else events(result.data.events);
+      else { memory.accept(undefined, result.data); if (result.data.thrown) throw error(result.data.thrown); events(result.data.events); }
     } catch (cause) { if (!closed) { closed = true; terminalError = cause; clearInterval(timer); for (const pending of promises.values()) pending.reject(cause); promises.clear(); report(cause); } }
     finally { polling = false; }
   }, 20);

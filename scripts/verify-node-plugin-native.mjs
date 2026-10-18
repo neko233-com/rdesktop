@@ -12,7 +12,7 @@ assert(!(mode==='public'&&hidden),'The public plugin UIA input/invoke acceptance
 const output=resolve(outputArgument),location=relative(repo,output);assert(isAbsolute(location)||location==='..'||location.startsWith('..\\')||location.startsWith('../'),'QA output must be outside the repository');await fs.mkdir(output,{recursive:true});
 const runRoot=join(output,`${mode}-${hidden?'hidden':'visible'}-${randomUUID()}`);await fs.mkdir(runRoot);
 const packageRoot=mode==='public'?resolve(publicPackage):join(runRoot,'package');
-if(mode!=='public'){await fs.mkdir(packageRoot);for(const file of ['index.html','preload.cjs','helper.cjs','cycle-a.cjs','cycle-b.cjs','late.cjs','shadow.cjs','buffer-cases.cjs'])await fs.copyFile(join(repo,'examples/node_plugin/fixtures',file),join(packageRoot,file));}
+if(mode!=='public'){await fs.mkdir(packageRoot);for(const file of ['index.html','preload.cjs','helper.cjs','cycle-a.cjs','cycle-b.cjs','late.cjs','shadow.cjs','buffer-cases.cjs','memory-cases.cjs'])await fs.copyFile(join(repo,'examples/node_plugin/fixtures',file),join(packageRoot,file));}
 const nodeExe=process.env.RDESKTOP_TEST_NODE;assert(nodeExe);const nodeSha=createHash('sha256').update(await fs.readFile(nodeExe)).digest('hex');assert.equal(nodeSha,process.env.RDESKTOP_TEST_NODE_SHA256,'Explicitly pin the selected Node binary');
 const sessionFile=join(runRoot,'session.json');const executable=process.env.RDESKTOP_PLUGIN_FIXTURE_EXE||join(repo,'target/debug/node_plugin.exe');
 const snapshot=()=>JSON.parse(execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command','Get-CimInstance Win32_Process | Select-Object Name,ProcessId,ParentProcessId | ConvertTo-Json -Compress'],{windowsHide:true,encoding:'utf8'}));
@@ -26,7 +26,7 @@ try{
  await until(async()=>{session=await fs.readFile(sessionFile,'utf8').then(JSON.parse,()=>null);return session;},'session');
  const main=await until(async()=>(await call('windows')).windows.find(w=>w.title==='rdesktop Native Node Plugin'),'native window');const window=main.id;
  const req=(cmd,p={})=>call(cmd,{window,...p}),evaluate=expression=>req('evaluate',{expression});
- await until(()=>evaluate('document.readyState==="complete"').catch(()=>false),'document');
+ await until(()=>evaluate('location.protocol==="http:"&&location.hostname==="127.0.0.1"&&document.readyState==="complete"&&!!window.__RDESKTOP_NODE_STATUS__').catch(()=>false),'actual package document and preload');
  const status=await evaluate('window.__RDESKTOP_NODE_STATUS__??null');assert(status,'renderer preload did not initialize: '+await evaluate('document.body?.innerText'));
  assert.equal(status.renderer,'native-webview');assert.equal(status.electron,false);assert.equal((await call('windows')).windows.find(w=>w.id===window).visible,!hidden);
  assert.equal(status.nodeGlobals,preloadOnly?'preload-only':'page');
@@ -56,11 +56,17 @@ try{
   const bufferDifferences=actualBuffers.filter((item,index)=>!isDeepStrictEqual(item,expectedBuffers[index]));
   assert.equal(actualBuffers.length,expectedBuffers.length);assert.equal(bufferDifferences.length,0,'Buffer behavior differs from pinned Node: '+bufferDifferences.slice(0,12).map(item=>item.name).join(', '));
   console.log(JSON.stringify({bufferCases:actualBuffers.length,bufferDifferences:bufferDifferences.length}));
+  const expectedMemory=JSON.parse(execFileSync(nodeExe,[join(packageRoot,'memory-cases.cjs')],{encoding:'utf8',windowsHide:true}));
+  const actualMemory=await evaluate('window.runMemoryCases()');
+  await fs.writeFile(join(runRoot,'memory-reference.json'),JSON.stringify(expectedMemory,null,2));await fs.writeFile(join(runRoot,'memory-native.json'),JSON.stringify(actualMemory,null,2));
+  const memoryDifferences=actualMemory.filter((item,index)=>!isDeepStrictEqual(item,expectedMemory[index]));
+  assert.equal(actualMemory.length,expectedMemory.length);assert.equal(memoryDifferences.length,0,'Native memory behavior differs: '+memoryDifferences.map(item=>item.name).join(', '));
+  console.log(JSON.stringify({memoryCases:actualMemory.length,memoryDifferences:memoryDifferences.length}));
   const transportChecks=await evaluate('window.runTransportChecks()');assert(Object.values(transportChecks).every(Boolean),JSON.stringify(transportChecks));
   const fastBufferChecks=await evaluate('window.runFastBufferChecks()');assert(Object.values(fastBufferChecks).every(Boolean),JSON.stringify(fastBufferChecks));
   await fs.writeFile(join(runRoot,'buffer-transport.json'),JSON.stringify(transportChecks,null,2));
   if(!hidden){const response=await fetch(session.url+'/__rdesktop__/agent/native-screenshot',{method:'POST',headers:{authorization:'Bearer '+session.token,'content-type':'application/json'},body:JSON.stringify({window})});assert(response.ok);await fs.writeFile(join(runRoot,'native.png'),Buffer.from(await response.arrayBuffer()));}
-  await fs.writeFile(join(runRoot,'proof.json'),JSON.stringify({mode,hidden,status,pageGlobals,ownedProcesses,result,bufferComparison:{cases:actualBuffers.length,differences:bufferDifferences.length,transportChecks,fastBufferChecks}},null,2));console.log(JSON.stringify(result));
+  await fs.writeFile(join(runRoot,'proof.json'),JSON.stringify({mode,hidden,status,pageGlobals,ownedProcesses,result,memoryComparison:{cases:actualMemory.length,differences:memoryDifferences.length},bufferComparison:{cases:actualBuffers.length,differences:bufferDifferences.length,transportChecks,fastBufferChecks}},null,2));console.log(JSON.stringify(result));
  }
  console.log(JSON.stringify({output:runRoot,mode,hidden,passed:true}));
 }catch(error){

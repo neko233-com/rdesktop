@@ -171,7 +171,7 @@ hidden native windows with the preload-only policy, plus the default page-global
 policy. The original public package also passed the preload-only policy and
 passed UIA Value/Invoke, label relation, byte-preservation and real mkdir checks.
 The accepted-socket fix also passed eight consecutive native fixture runs. The
-22 explicit Node tests (including the externally hosted session and copy-only
+23 explicit Node tests (including the externally hosted session, memory and copy-only
 Buffer gates) and the full
 workspace's native-agent build/test/clippy checks passed.
 
@@ -183,6 +183,35 @@ overlapping copy/fill, shared views, legacy constructors, and a small view on an
 100000-iteration numeric read/write loop returned the expected sum with zero
 IPC requests. Full reference/native results and transport-fault proofs are saved
 by `verify-node-plugin-native.mjs` outside the repository.
+
+Renderer module calls now synchronize binary arguments back to their original
+document storage. Buffer, TypedArray, DataView and ArrayBuffer inputs preserve
+their types and shared backing relationships. Returned original views retain
+identity; new views on those same native backings retain sharing and identity
+when repeated. Writeback precedes callback and Promise delivery, and a native
+throw still reports writes made before the error. Stable callback identities
+continue to work with EventEmitter removal. Untracked native typed-array results
+preserve their element type instead of becoming Buffer objects.
+
+Thirty-six identical case functions passed against the pinned Node executable
+and native WebView2, covering fs.read/readSync/readv, FileHandle Promise results,
+retained native views, mutation before throws, nested arguments, all typed-array
+types and an 8 MiB backing with a small exposed view. The private protocol uses
+weak backing/view registries, 64 MiB of live native backing allocation and 4096
+live views as explicit ceilings. Only exposed ranges are copied; this is not a
+shared JavaScript heap. SharedArrayBuffer, resizable backing stores, concurrent
+browser/native races and reading unexposed backing bytes are not equivalent to
+in-process Node. Individual requests/replies retain the 4 MiB frame limit and a
+writeback is bounded to 2 MiB of raw changed ranges. Large/chunked binary
+transport remains an integration gate.
+
+`node scripts/verify-node-memory-codec.mjs` deterministically checks reordered
+polls, overlapping and disjoint changes, local edits made while a poll is
+pending, aliasing and validation. Per-byte response epochs reject stale
+overlapping writes without losing older disjoint writes. Changed-byte snapshots
+are committed only after validating the entire response size; an oversized
+returned view cannot silently acknowledge unsent writes or discard queued
+callbacks. Ordinary Node operations are never replayed after an unknown result.
 
 The release example additionally passed the same 18 checks through real Windows
 accessibility input. It contained no Agent/session/headless/UIA debug markers,
@@ -244,8 +273,9 @@ The public-preload test additionally verifies the original `preload.js` and
 `utils.js` hashes from ISC `fugary/utools-file-to-folder` commit
 `8a3f257591935cf4d2dd4baa599f3c20fc1b7e5d`, then invokes its actual
 `createCurrentFolder` with a fresh absolute temporary path. This is a preload
-execution result; its original HTML and uTools lifecycle have not passed the
-new runtime's native acceptance yet.
+execution result; the separate native verifier above covers the original HTML,
+UIA and actual mkdir. Application-specific uTools lifecycle and integration
+still require the application's own acceptance.
 
 ## Native embedded documents on Windows
 

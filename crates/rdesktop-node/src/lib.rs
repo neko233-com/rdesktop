@@ -1,8 +1,8 @@
 //! Trusted CommonJS preload workers owned by rdesktop, without Electron.
 //!
 //! This is an execution primitive, not a Node sandbox or a complete Electron
-//! compatibility layer. It currently exports functions assigned to `window`;
-//! DOM access, callbacks and browser projection are separate integration work.
+//! compatibility layer. Direct workers export functions assigned to `window`;
+//! the experimental renderer module also projects CommonJS into native WebView2.
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -20,6 +20,7 @@ const MAX_NODE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TIMEOUT: Duration = Duration::from_secs(120);
 const WORKER: &str = include_str!("worker.cjs");
 const MODULES: &str = include_str!("modules.cjs");
+const MEMORY: &str = include_str!("memory.cjs");
 pub mod renderer;
 
 #[derive(Debug, thiserror::Error)]
@@ -168,7 +169,7 @@ impl NodeRuntime {
         }
         let (executable, verified_file) = verified_executable(&config)?;
         let mut command = Command::new(executable);
-        let source = format!("\"use strict\";\n{MODULES}\n{WORKER}");
+        let source = format!("\"use strict\";\n{MEMORY}\n{MODULES}\n{WORKER}");
         command
             .args(["--input-type=commonjs", "--eval", &source])
             .env_remove("NODE_OPTIONS")

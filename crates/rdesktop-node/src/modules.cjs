@@ -1,8 +1,10 @@
 // This factory runs inside the explicitly trusted, pinned Node worker.
 function createModuleRuntime(root, preload) {
   const fs = require('node:fs'), path = require('node:path'), Module = require('node:module');
+  const nativeTypes = require('node:util').types;
   const references = new Map(), identities = new WeakMap(), callbacks = new Map();
   const events = [];
+  const memory = createNodeMemory();
   let sequence = 0, overflow = false;
   const maxReferences = 4096, maxEvents = 256;
   function queue(event) {
@@ -28,7 +30,13 @@ function createModuleRuntime(root, preload) {
     if (typeof value === 'bigint') return { $rdesktop: 'bigint', value: String(value) };
     if (typeof value === 'number' && !Number.isFinite(value)) return { $rdesktop: 'number', value: String(value) };
     if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) return value;
-    if (Buffer.isBuffer(value) || value instanceof Uint8Array) return { $rdesktop: 'bytes', base64: Buffer.from(value).toString('base64') };
+    if (nativeTypes.isArrayBuffer(value) || ArrayBuffer.isView(value)) {
+      const mapped = memory.pack(value); if (mapped) return mapped;
+      if (Buffer.isBuffer(value)) return { $rdesktop: 'bytes', base64: value.toString('base64') };
+      const array = nativeTypes.isArrayBuffer(value), bytes = array ? Buffer.from(value) : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+      const type = array ? 'ArrayBuffer' : Object.prototype.toString.call(value).slice(8, -1);
+      return { $rdesktop: 'binary-view', type, base64: bytes.toString('base64'), length: array || type === 'DataView' ? value.byteLength : value.length };
+    }
     if (value instanceof Error) return { $rdesktop: 'error', ...diagnostic(value) };
     if (Array.isArray(value)) {
       if (seen.has(value)) return reference(value, receiver);
@@ -48,6 +56,7 @@ function createModuleRuntime(root, preload) {
       case 'bigint': return BigInt(value.value);
       case 'number': if (!['NaN', 'Infinity', '-Infinity'].includes(value.value)) throw new TypeError('Invalid number tag.'); return Number(value.value);
       case 'bytes': return Buffer.from(value.base64, 'base64');
+      case 'memory-view': return memory.unpack(value);
       case 'reference': return get(value.id);
       case 'callback': {
         if (typeof value.id !== 'string' || value.id.length > 64) throw new TypeError('Invalid renderer callback.');
@@ -149,7 +158,7 @@ function createModuleRuntime(root, preload) {
     else value = pack(result);
     return { value, changes: buffers.flatMap((store, backing) => store.equals(originals[backing]) ? [] : [{ backing, base64: store.toString('base64') }]) };
   }
-  return { request(message) {
+  function execute(message) {
     if (!message || typeof message.operation !== 'string') throw new TypeError('Invalid module operation.');
     let value;
     switch (message.operation) {
@@ -185,5 +194,21 @@ function createModuleRuntime(root, preload) {
     }
     if (overflow) throw new RangeError('Renderer event queue overflowed; close this runtime.');
     return { value, events: events.splice(0) };
+  }
+  return { request(message) {
+    if (!message?.rendererMemory || message.operation === 'buffer') return execute(message);
+    // Keep input views alive throughout the operation, including typed errors.
+    // Native objects and pending callbacks retain their own views afterwards;
+    // weak backing registries do not turn every call into a permanent copy.
+    let retained, result;
+    try { retained = memory.load(message.memory); result = execute(message); }
+    catch (error) { result = { thrown: diagnostic(error), events: events.splice(0) }; }
+    try {
+      const changes = memory.collect(false), response = { ...result, memory: changes }; void retained;
+      // The worker adds its own envelope. Do not acknowledge changed bytes before
+      // knowing that this entire reply fits its frame, including returned views.
+      if (Buffer.byteLength(JSON.stringify(response)) > 4 * 1024 * 1024 - 1024) throw new RangeError('Node memory response exceeds its frame limit.');
+      changes.commit(); return response;
+    } catch (error) { events.unshift(...(result.events || [])); throw error; }
   } };
 }

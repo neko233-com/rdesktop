@@ -31,6 +31,7 @@ window.runChecks=async()=>{
   return{checks,passed:Object.values(checks).every(value=>value===true),node:process.versions.node,electron:process.versions.electron??null};
 };
 window.runBufferCases=()=>require('./buffer-cases.cjs')(Buffer);
+window.runMemoryCases=()=>require('./memory-cases.cjs')(Buffer,require,__dirname);
 window.runTransportChecks=async()=>{
   const checks={},send=XMLHttpRequest.prototype.send,append=fs.appendFileSync,read=fs.readFileSync;
   const target=path.join(__dirname,'transport-replay.txt');fs.writeFileSync(target,'');

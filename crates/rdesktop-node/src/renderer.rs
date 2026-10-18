@@ -17,13 +17,16 @@ use std::{
 
 const LOADER: &str = include_str!("renderer.js");
 const BUFFER_FACTORY: &str = include_str!("buffer.js");
+const MEMORY_FACTORY: &str = include_str!("memory.js");
 const MAX_BODY: usize = 4 * 1024 * 1024;
 const MAX_ASSET: u64 = 16 * 1024 * 1024;
 
 fn renderer_script(options: &Value) -> String {
     format!(
         "({})({options});",
-        LOADER.replace("__RDESKTOP_BUFFER_FACTORY__", BUFFER_FACTORY)
+        LOADER
+            .replace("__RDESKTOP_BUFFER_FACTORY__", BUFFER_FACTORY)
+            .replace("__RDESKTOP_MEMORY_FACTORY__", MEMORY_FACTORY)
     )
 }
 

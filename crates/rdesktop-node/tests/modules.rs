@@ -144,6 +144,83 @@ fn real_async_callbacks_and_promises_use_the_scoped_event_queue() {
 
 #[test]
 #[ignore = "requires an explicitly pinned local Node executable"]
+fn renderer_memory_preserves_native_aliases_errors_and_bounds() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("preload.cjs"), "").unwrap();
+    let node = NodeRuntime::start_modules(config(root.path())).unwrap();
+    let vm = node.module_request(json!({"operation":"resolve","name":"node:vm","parent":root.path().join("preload.cjs")})).unwrap()["value"].clone();
+    let mutate = call(
+        &node,
+        &get(&node, &vm, "runInNewContext"),
+        json!(["(a,b)=>{a[0]=9;b[0]=8;return a;}"]),
+    )
+    .unwrap()["value"]
+        .clone();
+    let view = |id, offset, length| json!({"$rdesktop":"memory-view","id":id,"backing":"b1","offset":offset,"length":length,"byteLength":length,"type":"Buffer"});
+    let initial =
+        json!([{"id":"b1","byteLength":8,"offset":2,"base64":"AQIDBA==","writes":[[0,4]]}]);
+    let result = node.module_request(json!({"operation":"call","rendererMemory":true,"id":mutate["id"],"args":[view("v2",2,4),view("v3",3,2)],"memory":initial})).unwrap();
+    assert_eq!(result["value"]["id"], "v2");
+    assert_eq!(result["value"]["base64"], "CQgDBA==");
+    assert_eq!(result["memory"]["changes"][0]["offset"], 2);
+    assert_eq!(result["memory"]["changes"][0]["base64"], "CQg=");
+    let failed = call(
+        &node,
+        &get(&node, &vm, "runInNewContext"),
+        json!(["b=>{b[2]=7;throw new TypeError('after-write');}"]),
+    )
+    .unwrap()["value"]
+        .clone();
+    let result = node.module_request(json!({"operation":"call","rendererMemory":true,"id":failed["id"],"args":[view("v2",2,4)],"memory":[{"id":"b1","byteLength":8,"offset":2,"base64":"CQgDBA==","writes":[]}]})).unwrap();
+    assert_eq!(result["thrown"]["name"], "TypeError");
+    assert_eq!(result["memory"]["changes"][0]["offset"], 4);
+    assert_eq!(result["memory"]["changes"][0]["base64"], "Bw==");
+    let bounded = node.module_request(json!({"operation":"events","rendererMemory":true,"memory":[{"id":"b99","byteLength":67108865,"offset":0,"base64":"","writes":[]}]})).unwrap();
+    assert_eq!(bounded["thrown"]["name"], "TypeError");
+    let invalid = node.module_request(json!({"operation":"call","rendererMemory":true,"id":mutate["id"],"args":[view("v2",2,100)],"memory":[]})).unwrap();
+    assert_eq!(invalid["thrown"]["name"], "RangeError");
+    let large = call(
+        &node,
+        &get(&node, &vm, "runInNewContext"),
+        json!(["b=>{globalThis.kept=b;b.fill(65);return b;}"]),
+    )
+    .unwrap()["value"]
+        .clone();
+    let timers = node.module_request(json!({"operation":"resolve","name":"node:timers","parent":root.path().join("preload.cjs")})).unwrap()["value"].clone();
+    call(
+        &node,
+        &get(&node, &timers, "setTimeout"),
+        json!([{"$rdesktop":"callback","id":"oversize-preserves-callback"},0]),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let size = 2 * 1024 * 1024;
+    let zeros = "AAAA".repeat(size / 3) + "AAA=";
+    let oversized = node.module_request(json!({"operation":"call","rendererMemory":true,"id":large["id"],"args":[{"$rdesktop":"memory-view","id":"v99","backing":"b99","offset":0,"length":size,"byteLength":size,"type":"Buffer"}],"memory":[{"id":"b99","byteLength":size,"offset":0,"base64":zeros,"writes":[[0,size]]}]}));
+    assert!(
+        matches!(oversized, Err(NodeError::Preload(error)) if error.name == "RangeError" && error.message.contains("frame limit"))
+    );
+    let pending = node
+        .module_request(json!({"operation":"events","rendererMemory":true}))
+        .unwrap();
+    assert!(pending["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["id"] == "oversize-preserves-callback"));
+    let change = pending["memory"]["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|change| change["id"] == "b99")
+        .unwrap();
+    assert!(change["base64"].as_str().unwrap().starts_with("QUFB"));
+    assert_eq!(change["offset"], 0);
+    node.close().unwrap();
+}
+
+#[test]
+#[ignore = "requires an explicitly pinned local Node executable"]
 fn copied_buffer_commands_preserve_aliases_and_leave_callbacks_for_polling() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("preload.cjs"), "").unwrap();
