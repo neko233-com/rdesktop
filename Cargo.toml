@@ -8,6 +8,7 @@ members = [
     "crates/rdesktop-bundler",
     "crates/rdesktop-cli",
     "crates/rdesktop-assets",
+    "crates/rdesktop-node",
     "examples/hello_world",
     "examples/wallpaper",
     "examples/global_hotkey",

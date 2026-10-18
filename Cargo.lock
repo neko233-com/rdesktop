@@ -2460,6 +2460,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdesktop-node"
+version = "0.1.15"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rdesktop-webview"
 version = "0.1.15"
 dependencies = [
