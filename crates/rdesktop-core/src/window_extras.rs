@@ -252,10 +252,15 @@ mod windows {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use core_graphics::window::{CGWindowLevelForKey, CGWindowLevelKey};
-    use objc::{msg_send, runtime::Object};
+    use objc::{msg_send, runtime::Object, sel};
     use tao::platform::macos::WindowExtMacOS;
     use tao::window::Window;
+
+    // `core-graphics` 0.24 does not expose CGWindowLevelForKey.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGWindowLevelForKey(key: i32) -> i32;
+    }
 
     pub(crate) fn apply(window: &Window, click_through: bool, is_wallpaper: bool) {
         let ns_win = window.ns_window() as *mut Object;
@@ -265,8 +270,8 @@ mod macos {
         unsafe {
             let _: () = msg_send![ns_win, setIgnoresMouseEvents: click_through || is_wallpaper];
             if is_wallpaper {
-                let level: i64 =
-                    CGWindowLevelForKey(CGWindowLevelKey::kCGDesktopWindowLevelKey) as i64;
+                // kCGDesktopWindowLevelKey is the third CGWindowLevelKey enum value.
+                let level: i64 = CGWindowLevelForKey(2) as i64;
                 let _: () = msg_send![ns_win, setLevel: level];
                 let _: () = msg_send![ns_win, orderBack: ns_win];
             }
