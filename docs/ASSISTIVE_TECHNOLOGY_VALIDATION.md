@@ -157,6 +157,24 @@ the earlier Narrator baseline and the error-description regression above.
 
 ## Remaining acceptance
 
+The 0.1.15 production application repeated three actual NVDA 2026.2 groups:
+persistent label/help and landmarks, physical Shift+Tab/Enter skip navigation,
+and physical typing/Enter to the real Rust handler. Application UIA exposed
+`Hello, Reader fifteen!`, and Speech Viewer emitted `Calling Rust...` followed
+by that result. The generated EXE SHA-256 was
+`0e829aeb62f209a0118245a079d430b5f120f0d8b7e47dc0472d56140452a380`.
+Its own isolation run had no debug markers, no session/debug navigation and
+normal exit. The default and native fixture production EXEs independently
+passed the same isolation checks.
+
+This version repeats 213 native check groups, including 20 invocation-deadline
+groups in visible/hidden windows. Sixteen separate shipped-bridge source checks
+cover wait limits, callback/timer cleanup and failed transports. A real
+16-second Rust/CLI roundtrip remains responsive while another greeting runs.
+These IPC checks complement accessibility tests; they do not expand the
+assistive-technology certification scope. Narrator observations above remain
+the earlier baseline rather than a new 0.1.15 runtime run.
+
 Speech Viewer and Speech Recap prove emitted utterances, not audible
 intelligibility. Braille hardware, voice control, switch access, physical external
 file drops, Windows 10, and non-Windows assistive technologies require separate

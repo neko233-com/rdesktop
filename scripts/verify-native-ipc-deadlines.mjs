@@ -13,7 +13,7 @@ async function until(read,label){const end=Date.now()+12000;while(Date.now()<end
 const main=(await call('windows')).windows.find(window=>window.title==='rdesktop Native Agent');assert(main);
 const window=main.id,req=(command,params={},expected=200)=>call(command,{window,...params},expected),evaluate=expression=>req('evaluate',{expression});
 const info=await fetch(`${session.url}/__rdesktop__/info`,{headers});assert.equal(info.status,200);
-const capability=(await info.json()).capabilities.ipc;
+const information=await info.json(),capability=information.capabilities.ipc;
 assert.deepEqual(capability,{timeout_parameter:'timeout_ms',default_timeout_ms:120000,maximum_timeout_ms:600000,completion_grace_ms:2000,cancels_backend:false});
 await until(()=>evaluate('document.readyState==="complete"&&!!document.querySelector("#greet")'),'main fixture document');
 await until(()=>evaluate('Object.keys(window.__RDESKTOP_RESOLVE__).length===0'),'idle IPC');
@@ -49,7 +49,7 @@ try{
  await until(()=>evaluate('Object.keys(window.__RDESKTOP_RESOLVE__).length===0'),'completed IPC cleanup');
  const current=(await call('windows')).windows.find(item=>item.id===window);assert.equal(current.process_id,main.process_id);assert.equal(current.visible,main.visible);
  checks.push('same-native-process-visibility-and-empty-pending-table');
- const proof={headless:!main.visible,capability,elapsedMs,responsiveMs,checks};await writeFile(join(output,'proof.json'),JSON.stringify(proof,null,2));console.log(JSON.stringify(proof,null,2));
+ const proof={frameworkVersion:information.version,headless:!main.visible,capability,elapsedMs,responsiveMs,checks};await writeFile(join(output,'proof.json'),JSON.stringify(proof,null,2));console.log(JSON.stringify(proof,null,2));
 }finally{
  await evaluate('(()=>{const saved=window.__ipcDeadlineQa;if(saved){window.__RDESKTOP_IPC__=saved.ipc;if(saved.previousPush===undefined)delete window.__RDESKTOP_PUSH__;else window.__RDESKTOP_PUSH__=saved.previousPush;delete window.__ipcDeadlineQa;}})()');
 }
