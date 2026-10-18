@@ -175,6 +175,81 @@ impl NativeRuntime {
     pub fn close_window(&self, id: u64) -> Result<()> {
         self.enqueue(Request::Close(id))
     }
+    /// Places an existing native child above its parent's WebView content.
+    /// Bounds are physical pixels in the parent client area. This never reparents
+    /// arbitrary HWNDs: both IDs must belong to this runtime and the native
+    /// parent/WS_CHILD relationship is checked immediately before placement.
+    pub fn set_child_bounds(
+        &self,
+        child: u64,
+        parent: u64,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        if child == parent
+            || width == 0
+            || height == 0
+            || width > 8192
+            || height > 8192
+            || x.unsigned_abs() > 32768
+            || y.unsigned_abs() > 32768
+        {
+            return Err(RdesktopError::Config("invalid native child bounds".into()));
+        }
+        #[cfg(windows)]
+        {
+            use tao::platform::windows::WindowExtWindows;
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                GetParent, GetWindowLongPtrW, IsWindow, SetWindowPos, GWL_STYLE, HWND_TOP,
+                SWP_NOACTIVATE, SWP_SHOWWINDOW, WS_CHILD,
+            };
+            let parent = self.with_window(parent, |window, _| window.hwnd())?;
+            self.with_window(child, move |window, view| {
+                let hwnd = window.hwnd() as windows_sys::Win32::Foundation::HWND;
+                unsafe {
+                    if IsWindow(hwnd) == 0
+                        || IsWindow(parent as _) == 0
+                        || GetParent(hwnd) != parent as _
+                        || GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_CHILD == 0
+                    {
+                        return Err(
+                            "window is not a current child of the requested parent".to_string()
+                        );
+                    }
+                    if SetWindowPos(
+                        hwnd,
+                        HWND_TOP,
+                        x,
+                        y,
+                        width as i32,
+                        height as i32,
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    ) == 0
+                    {
+                        return Err(format!(
+                            "could not place native child: {}",
+                            std::io::Error::last_os_error()
+                        ));
+                    }
+                }
+                let size = window.inner_size();
+                view.set_bounds(wry::Rect {
+                    position: tao::dpi::PhysicalPosition::<i32>::new(0, 0).into(),
+                    size: size.into(),
+                })
+                .map_err(|error| error.to_string())
+            })?
+            .map_err(RdesktopError::Config)
+        }
+        #[cfg(not(windows))]
+        {
+            Err(RdesktopError::Config(
+                "native child bounds require Windows acceptance".into(),
+            ))
+        }
+    }
     pub fn exit(&self) -> Result<()> {
         self.enqueue(Request::Exit)
     }

@@ -1,1 +1,10 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Native CommonJS</title><style>body{font:16px system-ui;margin:32px;color:#222}button{font:inherit;padding:10px}pre{white-space:pre-wrap}label{display:block;margin:20px 0 8px}input{font:inherit}</style></head><body><h1>Native WebView2 + Node modules</h1><label for="message">Real desktop input</label><input id="message" value="native"><p><button id="run">Run original CommonJS preload</button></p><pre id="result">Ready</pre><script>document.querySelector('#run').onclick=async()=>{try{const result=await window.runChecks();document.querySelector('#result').textContent=JSON.stringify(result,null,2);window.result=result;}catch(error){window.failure=error.stack;document.querySelector('#result').textContent=error.stack;}};</script></body></html>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Native CommonJS</title>
+<link rel="icon" href="data:,">
+<style>body{font:16px system-ui;margin:32px;color:#222}button{font:inherit;padding:10px}pre{white-space:pre-wrap}label{display:block;margin:20px 0 8px}input{font:inherit}</style></head>
+<body><h1>Native WebView2 + Node modules</h1><label for="message">Real desktop input</label><input id="message" value="native">
+<p><button id="run">Run original CommonJS preload</button></p>
+<p><button id="run-memory">Run native memory cases</button></p><output id="memory-result">Memory cases ready</output>
+<pre id="result">Ready</pre><script>
+document.querySelector('#run').onclick=async()=>{try{const result=await window.runChecks();document.querySelector('#result').textContent=JSON.stringify(result,null,2);window.result=result;}catch(error){window.failure=error.stack;document.querySelector('#result').textContent=error.stack;}};
+document.querySelector('#run-memory').onclick=async()=>{try{window.memoryResult=await window.runMemoryCases();document.querySelector('#memory-result').textContent='Completed '+window.memoryResult.length+' native memory cases';}catch(error){window.memoryFailure=error.stack;document.querySelector('#memory-result').textContent=error.stack;}};
+</script></body></html>

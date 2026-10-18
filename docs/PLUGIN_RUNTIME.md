@@ -252,6 +252,18 @@ Before claiming that migration is complete:
 Neither a renamed process nor copied iHub adapters meet these gates. The same
 renderer must supply the plugin's actual desktop and accessibility behavior.
 
+The private Node event receiver serializes reads through the same bounded RPC
+as module calls. It leaves no outstanding fetch/XHR body while a document runs
+synchronous CommonJS calls, and applies writeback before delivering callbacks.
+It shares the same origin, capability and document checks. A plugin's
+own fetch replacement cannot intercept private callbacks or Promise delivery;
+the native fixture tests this explicitly. Visible memory acceptance invokes the
+actual Windows UIA button; hidden acceptance executes in the same native engine.
+The poll timer is created only for registered callbacks, pending Promises or
+released references, and stops when none remain. A synchronous-only plugin does
+not issue idle event polls; native acceptance counts those requests before its
+first asynchronous operation. Complete callback retirement remains a gate.
+
 ## Repeating worker tests
 
 Pure configuration tests run with `cargo test --workspace`. Tests requiring an
@@ -287,6 +299,20 @@ show/hide and style updates. Converting an existing top-level window with
 the next show operation. Applications still own child bounds, document IPC,
 navigation policy and lifetime. Other platforms return an explicit unsupported
 error for this option until they have native acceptance coverage.
+
+After creation, `NativeRuntime::set_child_bounds(child, parent, x, y, width,
+height)` places a current Windows child in physical parent-client coordinates,
+raises it above the parent's WebView content and updates its WebView bounds.
+Creating WS_CHILD alone does not ensure that it is visible above the owner's
+own WebView. Both runtime IDs, the current native parent relationship and the
+WS_CHILD style are checked; a top-level window or mismatched parent is rejected.
+Bounds are finite integers with dimensions 1..8192 and coordinates within
+32768 pixels. No arbitrary external HWND can be supplied.
+
+`verify-node-plugin-native.mjs fixture OUTPUT --preload-only --embedded` uses
+separate native browser profiles, a resident owner and this placement API. It
+checks the invalid-parent/bounds paths, actual child UIA execution and captures
+the owner compositor including the child. No second browser is bundled.
 
 Run `scripts/verify-native-child.mjs SESSION OUTPUT` against the `native_agent`
 example to exercise parent rejection, nested native accessibility, repeated

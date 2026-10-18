@@ -4,10 +4,10 @@
 import fs from 'node:fs/promises';import {spawn,execFileSync} from 'node:child_process';import {createHash,randomUUID} from 'node:crypto';import {join,resolve,relative,isAbsolute} from 'node:path';import {fileURLToPath} from 'node:url';import {isDeepStrictEqual} from 'node:util';import {setTimeout as delay} from 'node:timers/promises';import assert from 'node:assert/strict';
 assert.equal(process.platform,'win32','Windows x64 is the current native acceptance platform');assert.equal(process.arch,'x64');
 const repo=fileURLToPath(new URL('../',import.meta.url));
-const [mode,outputArgument,...rest]=process.argv.slice(2),hidden=rest.includes('--headless'),preloadOnly=rest.includes('--preload-only');
+const [mode,outputArgument,...rest]=process.argv.slice(2),hidden=rest.includes('--headless'),preloadOnly=rest.includes('--preload-only'),embedded=rest.includes('--embedded');
 const publicPackage=mode==='public'?rest.shift():undefined,flags=rest;
 assert(['fixture','public'].includes(mode)&&outputArgument,'Expected fixture|public and an external OUTPUT directory');
-assert(!flags.some(flag=>!['--headless','--preload-only'].includes(flag)));assert(!publicPackage||mode==='public');
+assert(!flags.some(flag=>!['--headless','--preload-only','--embedded'].includes(flag)));assert(!publicPackage||mode==='public');
 assert(!(mode==='public'&&hidden),'The public plugin UIA input/invoke acceptance requires a visible window');
 const output=resolve(outputArgument),location=relative(repo,output);assert(isAbsolute(location)||location==='..'||location.startsWith('..\\')||location.startsWith('../'),'QA output must be outside the repository');await fs.mkdir(output,{recursive:true});
 const runRoot=join(output,`${mode}-${hidden?'hidden':'visible'}-${randomUUID()}`);await fs.mkdir(runRoot);
@@ -18,7 +18,7 @@ const sessionFile=join(runRoot,'session.json');const executable=process.env.RDES
 const snapshot=()=>JSON.parse(execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command','Get-CimInstance Win32_Process | Select-Object Name,ProcessId,ParentProcessId | ConvertTo-Json -Compress'],{windowsHide:true,encoding:'utf8'}));
 async function packageHashes(){const files=execFileSync('git',['-C',packageRoot,'ls-files','-z'],{windowsHide:true,encoding:'utf8'}).split('\0').filter(Boolean);return Object.fromEntries(await Promise.all(files.map(async file=>[file,createHash('sha256').update(await fs.readFile(join(packageRoot,file))).digest('hex')])));}
 let originalHashes;if(mode==='public'){assert.equal(execFileSync('git',['-C',packageRoot,'rev-parse','HEAD'],{windowsHide:true,encoding:'utf8'}).trim(),'8a3f257591935cf4d2dd4baa599f3c20fc1b7e5d');originalHashes=await packageHashes();}
-const child=spawn(executable,[],{windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,RDESKTOP_TEST_NODE:nodeExe,RDESKTOP_TEST_NODE_SHA256:nodeSha,RDESKTOP_PLUGIN_ROOT:packageRoot,RDESKTOP_PLUGIN_PRELOAD:mode==='public'?'preload.js':'preload.cjs',RDESKTOP_PLUGIN_NODE_GLOBALS:preloadOnly?'preload-only':'page',RDESKTOP_PLUGIN_FIXTURE_FOLDER:runRoot,RDESKTOP_AGENT:'1',RDESKTOP_AGENT_SESSION:sessionFile,...(hidden?{RDESKTOP_HEADLESS:'1'}:{RDESKTOP_HEADLESS:'0'})}});
+const child=spawn(executable,[],{windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,RDESKTOP_TEST_NODE:nodeExe,RDESKTOP_TEST_NODE_SHA256:nodeSha,RDESKTOP_PLUGIN_ROOT:packageRoot,RDESKTOP_PLUGIN_PRELOAD:mode==='public'?'preload.js':'preload.cjs',RDESKTOP_PLUGIN_NODE_GLOBALS:preloadOnly?'preload-only':'page',RDESKTOP_PLUGIN_FIXTURE_FOLDER:runRoot,RDESKTOP_PLUGIN_EMBEDDED:embedded?'1':'0',RDESKTOP_AGENT:'1',RDESKTOP_AGENT_SESSION:sessionFile,...(hidden?{RDESKTOP_HEADLESS:'1'}:{RDESKTOP_HEADLESS:'0'})}});
 let log='';child.stdout.on('data',b=>log+=b);child.stderr.on('data',b=>log+=b);const exited=new Promise(done=>child.once('exit',(code,signal)=>done({code,signal})));let session,ownedProcesses=[];
 async function call(command,params={}){const response=await fetch(session.url+'/__rdesktop__/agent/'+command,{method:'POST',headers:{authorization:'Bearer '+session.token,'content-type':'application/json'},body:JSON.stringify(params)});const value=await response.json();assert(response.ok,JSON.stringify(value));return value;}
 async function until(read,label,timeout=20000){const end=Date.now()+timeout;while(Date.now()<end){const v=await read();if(v)return v;if(child.exitCode!==null)throw Error(log);await delay(50);}throw Error('Timed out: '+label+'\n'+log);}
@@ -26,6 +26,8 @@ try{
  await until(async()=>{session=await fs.readFile(sessionFile,'utf8').then(JSON.parse,()=>null);return session;},'session');
  const main=await until(async()=>(await call('windows')).windows.find(w=>w.title==='rdesktop Native Node Plugin'),'native window');const window=main.id;
  const req=(cmd,p={})=>call(cmd,{window,...p}),evaluate=expression=>req('evaluate',{expression});
+ const captureWindow=embedded?(await call('windows')).windows.find(window=>window.title==='Native plugin owner').id:window;
+ if(embedded)assert.equal((await req('window',{operation:'child-bounds',parent:captureWindow,x:0,y:0,width:800,height:600})).source,'native-child-bounds');
  await until(()=>evaluate('location.protocol==="http:"&&location.hostname==="127.0.0.1"&&document.readyState==="complete"&&!!window.__RDESKTOP_NODE_STATUS__').catch(()=>false),'actual package document and preload');
  const status=await evaluate('window.__RDESKTOP_NODE_STATUS__??null');assert(status,'renderer preload did not initialize: '+await evaluate('document.body?.innerText'));
  assert.equal(status.renderer,'native-webview');assert.equal(status.electron,false);assert.equal((await call('windows')).windows.find(w=>w.id===window).visible,!hidden);
@@ -40,12 +42,13 @@ try{
   const tree=await until(async()=>{const value=await req('uia',{max_nodes:1500});return value.nodes.some(n=>n.automation_id==='folderName'&&n.control_type===50004)?value:null;},'original native UIA input');const field=tree.nodes.find(n=>n.automation_id==='folderName'&&n.control_type===50004);assert(field?.runtime_id);
   const destination=join(runRoot,'原始插件创建的目录');await req('uia',{operation:'set-value',target:{runtime_id:field.runtime_id},value:destination});
   await until(()=>evaluate('!Array.from(document.querySelectorAll("button")).find(b=>b.textContent.trim()==="新建文件夹").disabled'),'original reactive input');
-  if(!hidden){const response=await fetch(session.url+'/__rdesktop__/agent/native-screenshot',{method:'POST',headers:{authorization:'Bearer '+session.token,'content-type':'application/json'},body:JSON.stringify({window})});assert(response.ok);await fs.writeFile(join(runRoot,'native.png'),Buffer.from(await response.arrayBuffer()));}
+  if(!hidden){const response=await fetch(session.url+'/__rdesktop__/agent/native-screenshot',{method:'POST',headers:{authorization:'Bearer '+session.token,'content-type':'application/json'},body:JSON.stringify({window:captureWindow})});assert(response.ok);await fs.writeFile(join(runRoot,'native.png'),Buffer.from(await response.arrayBuffer()));}
   const relation=await req('uia',{operation:'relations',target:{runtime_id:field.runtime_id},relation:'labeled-by'});assert.equal(relation.related.total,1);assert.equal(relation.related.elements[0].name,'新建文件夹名：');
   const button=(await req('uia',{max_nodes:1500})).nodes.find(n=>n.name==='新建文件夹'&&n.control_type===50000);assert(button?.enabled);await req('uia',{operation:'invoke',target:{runtime_id:button.runtime_id}});
   await until(()=>fs.stat(destination).then(s=>s.isDirectory(),()=>false),'actual unchanged preload mkdir');
   await fs.writeFile(join(runRoot,'proof.json'),JSON.stringify({mode,hidden,status,pageGlobals,ownedProcesses,fieldProviderPid:field.process_id,hostPid:main.process_id,destination,label:relation.related.elements[0].name,originalPreload:true,originalHashes},null,2));
  }else{
+  const idleTransportChecks=await evaluate(`(async()=>{const send=XMLHttpRequest.prototype.send;let events=0;XMLHttpRequest.prototype.send=function(body){if(JSON.parse(body).operation==='events')events++;return send.call(this,body);};try{await new Promise(resolve=>setTimeout(resolve,120));return {noIdleEventPolling:events===0};}finally{XMLHttpRequest.prototype.send=send;}})()`);assert(idleTransportChecks.noIdleEventPolling);
   await req('action',{action:'fill',selector:'#message',value:'真实 WebView2'});
   await req('action',{action:'click',selector:'#run'});
   const result=await until(async()=>{const failure=await evaluate('window.failure??null');if(failure)throw Error(failure);return evaluate('window.result?.checks?window.result:null');},'actual Node/CommonJS/DOM checks');
@@ -57,16 +60,23 @@ try{
   assert.equal(actualBuffers.length,expectedBuffers.length);assert.equal(bufferDifferences.length,0,'Buffer behavior differs from pinned Node: '+bufferDifferences.slice(0,12).map(item=>item.name).join(', '));
   console.log(JSON.stringify({bufferCases:actualBuffers.length,bufferDifferences:bufferDifferences.length}));
   const expectedMemory=JSON.parse(execFileSync(nodeExe,[join(packageRoot,'memory-cases.cjs')],{encoding:'utf8',windowsHide:true}));
-  const actualMemory=await evaluate('window.runMemoryCases()');
+  let actualMemory;
+  if(hidden) actualMemory=await evaluate('window.runMemoryCases()');
+  else {
+   const runMemory=(await req('uia',{max_nodes:2000})).nodes.find(node=>node.name==='Run native memory cases'&&node.control_type===50000);assert(runMemory);
+   await req('uia',{operation:'invoke',target:{runtime_id:runMemory.runtime_id}});
+   actualMemory=await until(async()=>{const failure=await evaluate('window.memoryFailure??null');assert(!failure,failure);return evaluate('window.memoryResult??null');},'native UIA memory result');
+  }
   await fs.writeFile(join(runRoot,'memory-reference.json'),JSON.stringify(expectedMemory,null,2));await fs.writeFile(join(runRoot,'memory-native.json'),JSON.stringify(actualMemory,null,2));
   const memoryDifferences=actualMemory.filter((item,index)=>!isDeepStrictEqual(item,expectedMemory[index]));
   assert.equal(actualMemory.length,expectedMemory.length);assert.equal(memoryDifferences.length,0,'Native memory behavior differs: '+memoryDifferences.map(item=>item.name).join(', '));
   console.log(JSON.stringify({memoryCases:actualMemory.length,memoryDifferences:memoryDifferences.length}));
+  const privateTransportChecks=await evaluate('window.runPrivateTransportChecks()');assert(Object.values(privateTransportChecks).every(Boolean),JSON.stringify(privateTransportChecks));
   const transportChecks=await evaluate('window.runTransportChecks()');assert(Object.values(transportChecks).every(Boolean),JSON.stringify(transportChecks));
   const fastBufferChecks=await evaluate('window.runFastBufferChecks()');assert(Object.values(fastBufferChecks).every(Boolean),JSON.stringify(fastBufferChecks));
   await fs.writeFile(join(runRoot,'buffer-transport.json'),JSON.stringify(transportChecks,null,2));
-  if(!hidden){const response=await fetch(session.url+'/__rdesktop__/agent/native-screenshot',{method:'POST',headers:{authorization:'Bearer '+session.token,'content-type':'application/json'},body:JSON.stringify({window})});assert(response.ok);await fs.writeFile(join(runRoot,'native.png'),Buffer.from(await response.arrayBuffer()));}
-  await fs.writeFile(join(runRoot,'proof.json'),JSON.stringify({mode,hidden,status,pageGlobals,ownedProcesses,result,memoryComparison:{cases:actualMemory.length,differences:memoryDifferences.length},bufferComparison:{cases:actualBuffers.length,differences:bufferDifferences.length,transportChecks,fastBufferChecks}},null,2));console.log(JSON.stringify(result));
+  if(!hidden){const response=await fetch(session.url+'/__rdesktop__/agent/native-screenshot',{method:'POST',headers:{authorization:'Bearer '+session.token,'content-type':'application/json'},body:JSON.stringify({window:captureWindow})});assert(response.ok);await fs.writeFile(join(runRoot,'native.png'),Buffer.from(await response.arrayBuffer()));}
+  await fs.writeFile(join(runRoot,'proof.json'),JSON.stringify({mode,hidden,embedded,status,pageGlobals,ownedProcesses,result,idleTransportChecks,privateTransportChecks,memoryComparison:{cases:actualMemory.length,differences:memoryDifferences.length},bufferComparison:{cases:actualBuffers.length,differences:bufferDifferences.length,transportChecks,fastBufferChecks}},null,2));console.log(JSON.stringify(result));
  }
  console.log(JSON.stringify({output:runRoot,mode,hidden,passed:true}));
 }catch(error){

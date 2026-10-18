@@ -32,6 +32,15 @@ window.runChecks=async()=>{
 };
 window.runBufferCases=()=>require('./buffer-cases.cjs')(Buffer);
 window.runMemoryCases=()=>require('./memory-cases.cjs')(Buffer,require,__dirname);
+window.runPrivateTransportChecks=async()=>{
+  const original=window.fetch;
+  try{
+    window.fetch=()=>{throw new Error('Owned plugin fetch override must not intercept private Node events.');};
+    const immediate=await new Promise(resolve=>setImmediate(()=>resolve(true)));
+    const callback=await new Promise((resolve,reject)=>fs.readFile(path.join(__dirname,'真实 中文.txt'),(error,value)=>error?reject(error):resolve(Buffer.isBuffer(value))));
+    return {immediate,callback};
+  }finally{window.fetch=original;}
+};
 window.runTransportChecks=async()=>{
   const checks={},send=XMLHttpRequest.prototype.send,append=fs.appendFileSync,read=fs.readFileSync;
   const target=path.join(__dirname,'transport-replay.txt');fs.writeFileSync(target,'');

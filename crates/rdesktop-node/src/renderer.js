@@ -5,11 +5,12 @@ function rdesktopNodeRenderer(options) {
   const references = new WeakMap(), proxies = new Map(), callbacks = new Map(), callbackIds = new WeakMap();
   const promises = new Map(), released = new Set(), retained = new Map(), modules = new Map();
   let nodeProcess, nodeSetImmediate, nodeClearImmediate, memory;
-  let sequence = 0, closed = false, polling = false, terminalError = null;
+  const startInterval = window.setInterval.bind(window), stopInterval = window.clearInterval.bind(window);
+  let sequence = 0, closed = false, polling = false, terminalError = null, timer = null;
   const finalizer = new FinalizationRegistry(({ id, key }) => {
     if (!proxies.get(key)?.deref()) proxies.delete(key);
     const count = (retained.get(id) || 1) - 1;
-    if (count) retained.set(id, count); else { retained.delete(id); released.add(id); }
+    if (count) retained.set(id, count); else { retained.delete(id); released.add(id); ensureEvents(); }
   });
   function retain(value, id, key) { retained.set(id, (retained.get(id) || 0) + 1); released.delete(id); finalizer.register(value, { id, key }); }
   const errorTypes = new Map(Object.entries({ Error, TypeError, RangeError, ReferenceError, SyntaxError, EvalError, URIError }));
@@ -56,7 +57,7 @@ function rdesktopNodeRenderer(options) {
     if (references.has(value)) return { $rdesktop: 'reference', id: references.get(value) };
     if (typeof value === 'function') {
       let id = callbackIds.get(value);
-      if (!id) { if (callbacks.size >= 256) throw new RangeError('Renderer callback limit reached.'); id = String(++sequence); callbackIds.set(value, id); callbacks.set(id, value); }
+      if (!id) { if (callbacks.size >= 256) throw new RangeError('Renderer callback limit reached.'); id = String(++sequence); callbackIds.set(value, id); callbacks.set(id, value); ensureEvents(); }
       return { $rdesktop: 'callback', id };
     }
     if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return memory.tag(value);
@@ -81,7 +82,7 @@ function rdesktopNodeRenderer(options) {
     if (value.$rdesktop !== 'reference') throw new TypeError('Invalid Node value tag.');
     if (value.kind === 'promise') {
       const old = proxies.get(value.id)?.deref(); if (old) return old;
-      const promise = new Promise((resolve, reject) => promises.set(value.id, { resolve, reject })); proxies.set(value.id, new WeakRef(promise)); retain(promise, value.id, value.id); return promise;
+      const promise = new Promise((resolve, reject) => promises.set(value.id, { resolve, reject })); proxies.set(value.id, new WeakRef(promise)); retain(promise, value.id, value.id); ensureEvents(); return promise;
     }
     const key = value.id + ':' + (value.receiver || '');
     const old = proxies.get(key)?.deref(); if (old) return old;
@@ -155,19 +156,20 @@ function rdesktopNodeRenderer(options) {
     clearImmediate: { value: nodeClearImmediate, configurable: true, writable: true },
     __RDESKTOP_NODE_STATUS__: { value: Object.freeze({ node: options.node, renderer: 'native-webview', electron: false, nodeGlobals: options.exposeNodeGlobals === false ? 'preload-only' : 'page' }), configurable: false },
   });
-  const timer = setInterval(async () => {
+  function ensureEvents() { if (!closed && timer === null) timer = startInterval(pollEvents, 20); }
+  function pollEvents() {
     if (closed || polling) return; polling = true;
     try {
       const ids = [...released].slice(0, 4096); for (const id of ids) released.delete(id);
       if (ids.length) rpc({ operation: 'release', ids });
-      const response = await fetch(options.base + '__node', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Rdesktop-Node': options.token, 'X-Rdesktop-Document': documentIdentity }, body: JSON.stringify({ operation: 'events', rendererMemory: true }) });
-      if (!response.ok) throw new Error('Node event transport failed.');
-      const result = await response.json(); if (!result.success) { if (result.error?.code !== 'RDESKTOP_NODE_BUSY') throw error(result.error); }
-      else { memory.accept(undefined, result.data); if (result.data.thrown) throw error(result.data.thrown); events(result.data.events); }
-    } catch (cause) { if (!closed) { closed = true; terminalError = cause; clearInterval(timer); for (const pending of promises.values()) pending.reject(cause); promises.clear(); report(cause); } }
-    finally { polling = false; }
-  }, 20);
-  window.addEventListener('pagehide', () => { closed = true; clearInterval(timer); for (const pending of promises.values()) pending.reject(new Error('Renderer closed.')); promises.clear(); callbacks.clear(); }, { once: true });
+      // Serialize event reads with calls in this document. An outstanding async
+      // fetch/XHR can be starved by a run of synchronous CommonJS requests in a
+      // native child. The existing bounded RPC applies memory before callbacks.
+      if (callbacks.size || promises.size) rpc({ operation: 'events' });
+    } catch (cause) { if (!closed) { closed = true; terminalError = cause; for (const pending of promises.values()) pending.reject(cause); promises.clear(); report(cause); } }
+    finally { polling = false; if (closed || (!callbacks.size && !promises.size && !released.size)) { stopInterval(timer); timer = null; } }
+  }
+  window.addEventListener('pagehide', () => { closed = true; stopInterval(timer); timer = null; for (const pending of promises.values()) pending.reject(new Error('Renderer closed.')); promises.clear(); callbacks.clear(); }, { once: true });
   try { load(rpc({ operation: 'preload' })); }
   catch (cause) { report(cause); throw cause; }
 }

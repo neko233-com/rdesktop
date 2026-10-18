@@ -51,7 +51,12 @@ fn main() -> anyhow::Result<()> {
     let mut renderer = WebViewRenderer::new(&config)?;
     renderer.init()?;
     renderer.enable_native_agent_from_env()?;
-    renderer.set_resident(false);
+    let embedded = std::env::var_os("RDESKTOP_PLUGIN_EMBEDDED").is_some_and(|value| value == "1");
+    #[cfg(debug_assertions)]
+    let hidden = std::env::var_os("RDESKTOP_HEADLESS").is_some_and(|value| value == "1");
+    #[cfg(not(debug_assertions))]
+    let hidden = false;
+    renderer.set_resident(embedded);
     let native = renderer.native_runtime();
     let exiting = native.clone();
     renderer.set_native_event_handler(Arc::new(move |_, event| {
@@ -92,16 +97,63 @@ fn main() -> anyhow::Result<()> {
     initialization.push_str(bridge.initialization_script());
     let url = bridge.url().to_owned();
     let window_config = config.window.clone();
+    let profile = std::env::var_os("RDESKTOP_PLUGIN_FIXTURE_FOLDER")
+        .map(PathBuf::from)
+        .map(|root| root.join("webview-profile"));
     let window_thread = std::thread::spawn(move || {
-        native.create_window(
-            window_config,
+        let parent = if embedded {
+            let mut owner = window_config.clone();
+            owner.title = "Native plugin owner".into();
+            owner.width = 900;
+            owner.height = 700;
+            let id = native.create_window(
+                owner,
+                NativeWindowOptions {
+                    url: "about:blank".into(),
+                    ..Default::default()
+                },
+            )?;
+            if !hidden {
+                native.with_window(id, |window, _| window.set_visible(true))?;
+            }
+            Some(id)
+        } else {
+            None
+        };
+        let mut child_config = window_config;
+        if embedded {
+            child_config.decorations = false;
+            child_config.resizable = false;
+        }
+        let child = native.create_window(
+            child_config,
             NativeWindowOptions {
                 url,
                 initialization_script: initialization,
                 ipc_enabled: true,
+                parent_window: parent,
+                data_directory: embedded.then_some(profile).flatten(),
                 ..Default::default()
             },
-        )
+        )?;
+        if let Some(parent) = parent {
+            if native
+                .set_child_bounds(parent, child, 0, 0, 800, 600)
+                .is_ok()
+                || native
+                    .set_child_bounds(child, u64::MAX, 0, 0, 800, 600)
+                    .is_ok()
+                || native
+                    .set_child_bounds(child, parent, 0, 0, 8193, 600)
+                    .is_ok()
+            {
+                return Err(rdesktop_core::RdesktopError::Config(
+                    "invalid child placement was accepted".into(),
+                ));
+            }
+            native.set_child_bounds(child, parent, 0, 0, 800, 600)?;
+        }
+        Ok::<_, rdesktop_core::RdesktopError>(child)
     });
     Box::new(renderer).run()?;
     window_thread

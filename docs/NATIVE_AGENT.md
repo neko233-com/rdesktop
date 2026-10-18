@@ -92,7 +92,7 @@ Read commands also support GET with `window` and `selector` query parameters.
 | `events` | Last 512 engine console, exception, log, failed-network, Accessibility and intercepted-drag events; sequence strings and optional window filter |
 | `screenshot` | Real WebView content as PNG, including hidden startup windows |
 | `native-screenshot` | Windows Graphics Capture PNG of the selected renderer's OS frame, or its discovered `native_window`; requires visible, non-minimized window |
-| `window` | `operation`: show/hide/focus/minimize/restore/maximize/resize/zoom/close; resize uses logical pixels, zoom accepts `factor` 0.25..5 |
+| `window` | `operation`: show/hide/focus/minimize/restore/maximize/resize/zoom/close; resize uses logical pixels, zoom accepts `factor` 0.25..5. Windows `child-bounds` requires an owned `parent` ID, physical `x/y/width/height`, dimensions 1..8192 and coordinates within 32768. It validates the existing native child relationship and raises the child above its owner WebView. |
 | `reload` | Reload the selected WebView without restarting Rust |
 | `ipc` | `cmd`, `payload`, optional integer `timeout_ms` 1..600000 (default 120000); traverses the selected WebView's real IPC bridge |
 | `exit` | Request normal application exit |

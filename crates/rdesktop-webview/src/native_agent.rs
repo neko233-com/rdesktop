@@ -685,6 +685,14 @@ impl NativeAgentBackend for Backend {
                 let operation=string(&params,"operation")?.to_string();
                 if operation=="close" { self.runtime.close_window(id).map_err(|e|e.to_string())?;return Ok(json!({"accepted":true})); }
                 let width=params["width"].as_u64();let height=params["height"].as_u64();
+                if operation=="child-bounds" {
+                    let parent=self.window(&json!({"window":string(&params,"parent")?}))?;
+                    let x=params["x"].as_i64().and_then(|n|i32::try_from(n).ok()).ok_or("child x must be an i32 physical coordinate")?;
+                    let y=params["y"].as_i64().and_then(|n|i32::try_from(n).ok()).ok_or("child y must be an i32 physical coordinate")?;
+                    if !width.is_some_and(|v|(1..=8192).contains(&v)) || !height.is_some_and(|v|(1..=8192).contains(&v)){return Err("child dimensions must be 1..8192 physical pixels".into());}
+                    self.runtime.set_child_bounds(id,parent,x,y,width.unwrap() as u32,height.unwrap() as u32).map_err(|error|error.to_string())?;
+                    return Ok(json!({"success":true,"source":"native-child-bounds"}));
+                }
                 if operation=="zoom" {
                     let factor=params["factor"].as_f64().filter(|v|v.is_finite() && (0.25..=5.0).contains(v)).ok_or("zoom factor must be 0.25..5")?;
                     return self.runtime.with_window(id,move |_,view|view.zoom(factor).map(|_|json!({"success":true})).map_err(|e|e.to_string())).map_err(|e|e.to_string())?;
