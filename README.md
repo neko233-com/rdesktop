@@ -103,6 +103,23 @@ async runtime can override `IpcHandler::handle_async` and invoke the supplied
 request ID and may arrive out of order; window operations remain event-loop
 owned and are never executed from a worker thread.
 
+Frontend calls retain a 120-second default wait and accept an optional bounded
+deadline for intentional long-running work:
+
+```javascript
+const reply = await window.__RDESKTOP_INVOKE__(
+  "download", { artifact: "example" }, { timeoutMs: 240000 },
+);
+```
+
+`timeoutMs` must be an integer from 1 to 600000. Timeouts reject with
+`code = "RDESKTOP_IPC_TIMEOUT"` and the chosen `timeoutMs`. Native responses,
+transport errors and serialization failures clean up their pending callbacks
+and timers; late replies are not push events. Browser preview applies the same
+deadline while aborting its HTTP wait. A timeout does not cancel an already
+dispatched Rust operation or retry it. The native Agent/CLI exposes the matching
+`timeout_ms` parameter; see [its IPC contract](docs/NATIVE_AGENT.md).
+
 ### Visual verification and recording
 
 The Agent API owns one recording session and one fixed output file per development server:

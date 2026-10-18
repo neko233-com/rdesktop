@@ -22,9 +22,34 @@
     }
 
     // IPC bridge: allows frontend code to call development commands.
-    window.__RDESKTOP_INVOKE__ = async function(cmd, payload) {
+    window.__RDESKTOP_INVOKE__ = async function(cmd, payload, options) {
+        if (options !== undefined && (!options || typeof options !== 'object' || Array.isArray(options))) {
+            throw new TypeError('IPC options must be an object');
+        }
+        const timeoutMs = options && options.timeoutMs !== undefined ? options.timeoutMs : 120000;
+        if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) {
+            throw new RangeError('IPC timeoutMs must be an integer from 1 to 600000');
+        }
         const id = Math.random().toString(36).slice(2);
-        return postJson(`${RDESKTOP_BASE}/agent/ipc`, { id, cmd, payload });
+        const controller = new AbortController();
+        let timer;
+        const expired = new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                const timeout = new Error('IPC timeout');
+                timeout.code = 'RDESKTOP_IPC_TIMEOUT';
+                timeout.timeoutMs = timeoutMs;
+                reject(timeout);
+                controller.abort();
+            }, timeoutMs);
+        });
+        try {
+            return await Promise.race([
+                postJson(`${RDESKTOP_BASE}/agent/ipc`, { id, cmd, payload }, { signal: controller.signal }),
+                expired,
+            ]);
+        } finally {
+            clearTimeout(timer);
+        }
     };
 
     // State reporter: sends app state to the dev server.

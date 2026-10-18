@@ -35,9 +35,23 @@ const status=ax.result.nodes.find(node=>node.role?.value==='status');assert(stat
 assert(status.properties.some(property=>property.name==='live'&&property.value?.value==='polite'));
 assert.equal(await evaluate('document.querySelector("label[for=nameInput]").textContent'),'Your name');
 checks.push('computed-persistent-label-main-landmark-and-live-status');
-const native=await req('uia');assert.equal(native.source,'windows-uia');
-const input=native.nodes.find(node=>node.name==='Your name'&&node.control_type===50004);
-if(main.visible){assert(input?.runtime_id);await req('uia',{operation:'set-value',target:{runtime_id:input.runtime_id},value:'Native label 中文'});await until('document.querySelector("#nameInput").value==="Native label 中文"');checks.push('native-uia-labelled-input-value');}
+let native=await req('uia');assert.equal(native.source,'windows-uia');
+await writeFile(join(output,'native-initial.json'),JSON.stringify(native,null,2));
+let input=native.nodes.find(node=>node.name==='Your name'&&node.control_type===50004);
+const providerObservations=[{nodes:native.nodes.length,inputAvailable:!!input}],providerStarted=Date.now();
+if(main.visible){
+    // Document readiness and engine AX do not prove that Windows has published
+    // its cross-process provider yet. Wait only on real UIA, preserving the
+    // first and final snapshots; provider errors still fail immediately.
+    while(!input&&Date.now()-providerStarted<10000){
+        await delay(50);native=await req('uia');assert.equal(native.source,'windows-uia');
+        input=native.nodes.find(node=>node.name==='Your name'&&node.control_type===50004);
+        providerObservations.push({elapsedMs:Date.now()-providerStarted,nodes:native.nodes.length,inputAvailable:!!input});
+    }
+    await writeFile(join(output,'native-ready.json'),JSON.stringify(native,null,2));
+    assert(input?.runtime_id,JSON.stringify({providerObservations}));
+    await req('uia',{operation:'set-value',target:{runtime_id:input.runtime_id},value:'Native label 中文'});await until('document.querySelector("#nameInput").value==="Native label 中文"');checks.push('native-uia-labelled-input-value');
+}
 else{assert.equal((await call('windows')).windows[0].visible,false);checks.push('hidden-provider-availability-reported-without-showing-window');}
 await req('action',{action:'fill',selector:'#nameInput',value:'Keyboard 中文'});
 await req('action',{action:'press',value:'Enter'});
@@ -102,5 +116,5 @@ const events=(await req('events')).events;
 assert(!events.some(event=>event.method==='Runtime.exceptionThrown'),JSON.stringify(events.filter(event=>event.method==='Runtime.exceptionThrown')));
 assert.equal((await call('windows')).windows[0].visible,main.visible);
 checks.push('no-uncaught-errors-or-visibility-changes');
-const proof={mode:session.mode,headless:!main.visible,uiaNodes:native.nodes.length,nativeInputAvailable:!!input,audits,checks};
+const proof={mode:session.mode,headless:!main.visible,uiaNodes:native.nodes.length,nativeInputAvailable:!!input,providerObservations,audits,checks};
 await writeFile(join(output,'proof.json'),JSON.stringify(proof,null,2));console.log(JSON.stringify(proof,null,2));

@@ -94,17 +94,43 @@ Read commands also support GET with `window` and `selector` query parameters.
 | `native-screenshot` | Windows Graphics Capture PNG of the selected renderer's OS frame, or its discovered `native_window`; requires visible, non-minimized window |
 | `window` | `operation`: show/hide/focus/minimize/restore/maximize/resize/zoom/close; resize uses logical pixels, zoom accepts `factor` 0.25..5 |
 | `reload` | Reload the selected WebView without restarting Rust |
-| `ipc` | `cmd`, `payload`; traverses the selected WebView's real IPC bridge |
+| `ipc` | `cmd`, `payload`, optional integer `timeout_ms` 1..600000 (default 120000); traverses the selected WebView's real IPC bridge |
 | `exit` | Request normal application exit |
 | `recording` | Current bounded Windows desktop recording state |
 | `recording/start` | `fps`, `max_duration_seconds`; starts or reuses one session, maximum one hour |
 | `recording/stop` | Optional `session_id`; finalizes that session |
 | `recording/file` | GET only; stream the completed desktop MP4 |
 
+For an application command that intentionally takes longer than the default,
+pass its bounded wait in the IPC parameter file:
+
+```json
+{"window":"1","cmd":"download","payload":{},"timeout_ms":240000}
+```
+
+`ipc` forwards this as the frontend bridge's third argument
+`{timeoutMs:240000}`. Native CDP completion adds 2000 ms of grace, and the CLI's
+HTTP wait adds a further 3000 ms. Other `evaluate` and `cdp` operations keep
+their existing 15-second native completion limit. The chosen deadline ends
+the wait; it does not cancel an already dispatched Rust command or retry it.
+Do not retry a timed-out operation with side effects without checking its
+application state. Info publishes these bounds in `capabilities.ipc`.
+
+Run `node scripts/verify-native-ipc-deadlines.mjs SESSION OUTPUT RDESKTOP_EXE`
+against `examples/native_agent` in visible and hidden modes. It exercises a
+real 16-second Rust command through the CLI, concurrent UI/greet responsiveness,
+typed short deadlines, actual late-reply arrival without a push event,
+serialization cleanup, and invalid bounds. The separate
+`node --test scripts/verify-ipc-deadlines.mjs` executes the shipped WebView,
+Chrome and browser bridge code with a controlled clock; waits beyond the old
+120-second limit are tested there without real multi-minute sleeps. Chrome's
+bridge-source tests do not certify its native runtime or accessibility.
+
 `GET /__rdesktop__/info` reports capabilities and capture scope. JSON requests
 are capped at 256 KiB, native responses at 32 MiB, outstanding requests at 16,
-and event payloads at 16 KiB. CDP completion has a 15-second deadline; queued
-expired operations are skipped. Lost windows and invalid calls fail explicitly.
+and event payloads at 16 KiB. General CDP completion has a 15-second deadline;
+IPC uses the bounded wait described above. Queued expired operations are skipped.
+Lost windows and invalid calls fail explicitly.
 
 Structured click, type, fill, clear, hover, focus, scroll, press and drag use CDP
 engine input. Clicks require one visible, enabled, unobscured element. `select`
@@ -379,6 +405,14 @@ console events, repeated hot reload with the same PID, and closed-ID rejection.
 It restores the exact frontend bytes after its owned hot-reload test. Artifacts
 and local credentials stay ignored. macOS/Linux native Agent support is not
 claimed by these Windows checks.
+
+Starter checks save `native-initial.json` and, for visible windows,
+`native-ready.json`. A completed document and engine AX tree can precede the
+Windows provider: the generated-project run observed 18 native nodes without
+the field, then 38 nodes with its real input after about 290 ms. The verifier
+waits at most 10 seconds on UIA publication, preserves provider errors, and
+still fails if the field never appears. Hidden runs do not wait for or show a
+provider, and never substitute engine AX for UIA.
 
 The UIA action fixture independently checks real native Value/Toggle/Range,
 single/multiple SelectionItem, Invoke/Legacy, ExpandCollapse, Text selection,

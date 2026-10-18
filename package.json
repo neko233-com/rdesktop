@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:ipc": "node --test scripts/verify-ipc-deadlines.mjs",
     "test:native": "node scripts/verify-native-agent.mjs",
     "test:accessibility": "node scripts/verify-native-accessibility.mjs"
   },

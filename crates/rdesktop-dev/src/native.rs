@@ -21,6 +21,21 @@ use crate::server::RecordingStore;
 
 pub const NATIVE_AGENT_PREFIX: &str = "/__rdesktop__/agent";
 const MAX_RESPONSE: usize = 32 * 1024 * 1024;
+pub const IPC_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+pub const IPC_MAX_TIMEOUT_MS: u64 = 600_000;
+pub const IPC_COMPLETION_GRACE_MS: u64 = 2_000;
+
+/// The frontend deadline is bounded separately from the HTTP/CDP completion
+/// grace. A deadline ends the wait; it does not cancel or retry a Rust command.
+pub fn ipc_timeout_ms(params: &Value) -> Result<u64, String> {
+    match params.get("timeout_ms") {
+        None => Ok(IPC_DEFAULT_TIMEOUT_MS),
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=IPC_MAX_TIMEOUT_MS).contains(value))
+            .ok_or_else(|| "timeout_ms must be an integer from 1 to 600000".into()),
+    }
+}
 
 /// The renderer owns window identity, threading, protocol calls and input.
 /// Calls run on bounded HTTP workers, never on the native event-loop thread.
@@ -413,6 +428,28 @@ fn failure(status: StatusCode, message: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ipc_deadline_defaults_and_explicit_bounds() {
+        use super::{ipc_timeout_ms, IPC_DEFAULT_TIMEOUT_MS, IPC_MAX_TIMEOUT_MS};
+        use serde_json::json;
+        assert_eq!(ipc_timeout_ms(&json!({})), Ok(IPC_DEFAULT_TIMEOUT_MS));
+        for value in [1, 20_000, IPC_MAX_TIMEOUT_MS] {
+            assert_eq!(ipc_timeout_ms(&json!({"timeout_ms":value})), Ok(value));
+        }
+        for value in [
+            json!(null),
+            json!(0),
+            json!(-1),
+            json!(600_001),
+            json!(1.5),
+            json!("100"),
+            json!(true),
+            json!([]),
+        ] {
+            assert!(ipc_timeout_ms(&json!({"timeout_ms":value})).is_err());
+        }
+    }
+
     use super::*;
     use tower::ServiceExt;
     struct Backend;

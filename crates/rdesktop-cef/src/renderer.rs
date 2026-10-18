@@ -189,19 +189,40 @@ impl CefRenderer {
         (function() {
             if (window.__RDESKTOP_BRIDGE__) return;
             window.__RDESKTOP_BRIDGE__ = true;
-            window.__RDESKTOP_RESOLVE__ = {};
+            window.__RDESKTOP_RESOLVE__ = Object.create(null);
             window.__RDESKTOP_QUEUE__ = [];
-            window.__RDESKTOP_INVOKE__ = function(cmd, payload) {
+            window.__RDESKTOP_INVOKE__ = function(cmd, payload, options) {
                 return new Promise(function(resolve, reject) {
+                    if (options !== undefined && (!options || typeof options !== 'object' || Array.isArray(options))) {
+                        throw new TypeError('IPC options must be an object');
+                    }
+                    var timeoutMs = options && options.timeoutMs !== undefined ? options.timeoutMs : 120000;
+                    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) {
+                        throw new RangeError('IPC timeoutMs must be an integer from 1 to 600000');
+                    }
                     var id = Math.random().toString(36).slice(2);
-                    window.__RDESKTOP_RESOLVE__[id] = resolve;
-                    window.__RDESKTOP_QUEUE__.push({ id: id, cmd: cmd, payload: payload || {} });
-                    setTimeout(function() {
+                    var timer = setTimeout(function() {
                         if (window.__RDESKTOP_RESOLVE__[id]) {
                             delete window.__RDESKTOP_RESOLVE__[id];
-                            reject(new Error('IPC timeout'));
+                            var error = new Error('IPC timeout');
+                            error.code = 'RDESKTOP_IPC_TIMEOUT';
+                            error.timeoutMs = timeoutMs;
+                            reject(error);
                         }
-                    }, 120000);
+                    }, timeoutMs);
+                    window.__RDESKTOP_RESOLVE__[id] = function(data) {
+                        clearTimeout(timer);
+                        delete window.__RDESKTOP_RESOLVE__[id];
+                        resolve(data);
+                    };
+                    try {
+                        var serialized = JSON.stringify({ id: id, cmd: cmd, payload: payload || {} });
+                        window.__RDESKTOP_QUEUE__.push(JSON.parse(serialized));
+                    } catch (error) {
+                        clearTimeout(timer);
+                        delete window.__RDESKTOP_RESOLVE__[id];
+                        reject(error);
+                    }
                 });
             };
             window.__rdesktop_take__ = function() {
@@ -215,6 +236,8 @@ impl CefRenderer {
                     if (data.id && window.__RDESKTOP_RESOLVE__[data.id]) {
                         window.__RDESKTOP_RESOLVE__[data.id](data);
                         delete window.__RDESKTOP_RESOLVE__[data.id];
+                    } else if (data.id && typeof data.success === 'boolean') {
+                        // An expired or duplicate reply is not a push event.
                     } else if (window.__RDESKTOP_PUSH__) {
                         // Unnamed push (e.g. extension host → UI event, or a
                         // global hotkey / global input event).

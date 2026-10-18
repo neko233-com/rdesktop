@@ -80,6 +80,20 @@ fn main() -> anyhow::Result<()> {
     let result_for_handler = dialog_result.clone();
     let handler = Box::new(FnIpcHandler::new(move |msg: IpcMessage| {
         let result = match msg.cmd.as_str() {
+            "delay" => {
+                match msg.payload["milliseconds"]
+                    .as_u64()
+                    .filter(|value| *value <= 20_000)
+                {
+                    Some(milliseconds) => {
+                        std::thread::sleep(std::time::Duration::from_millis(milliseconds));
+                        Ok(
+                            serde_json::json!({"milliseconds":milliseconds,"pid":std::process::id()}),
+                        )
+                    }
+                    None => Err("milliseconds must be an integer from 0 to 20000".into()),
+                }
+            }
             "greet" => Ok(
                 serde_json::json!({"message":format!("Hello, {}!",msg.payload["name"].as_str().unwrap_or("World")),"pid":std::process::id()}),
             ),

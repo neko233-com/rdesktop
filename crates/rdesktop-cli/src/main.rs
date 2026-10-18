@@ -468,6 +468,21 @@ fn validate_loopback_url(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn agent_http_timeout(
+    command: &str,
+    params: &serde_json::Value,
+) -> anyhow::Result<std::time::Duration> {
+    Ok(if command == "ipc" {
+        std::time::Duration::from_millis(
+            rdesktop_dev::native::ipc_timeout_ms(params).map_err(anyhow::Error::msg)?
+                + rdesktop_dev::native::IPC_COMPLETION_GRACE_MS
+                + 3_000,
+        )
+    } else {
+        std::time::Duration::from_secs(60)
+    })
+}
+
 async fn agent_response(
     session_path: &Path,
     command: &str,
@@ -505,9 +520,10 @@ async fn agent_response(
     let session: rdesktop_dev::native::NativeAgentSession =
         serde_json::from_slice(&std::fs::read(session_path)?)?;
     validate_loopback_url(&session.url)?;
+    let timeout = agent_http_timeout(command, &params)?;
     let client = reqwest::Client::builder()
         .no_proxy()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(timeout)
         .build()?;
     let url = if command == "info" {
         format!("{}/__rdesktop__/info", session.url)
@@ -838,5 +854,38 @@ fn parse_target(s: &str) -> anyhow::Result<BundleTarget> {
         "deb" => Ok(BundleTarget::LinuxDeb),
         "rpm" => Ok(BundleTarget::LinuxRpm),
         _ => anyhow::bail!("Unknown bundle target: {}", s),
+    }
+}
+
+#[cfg(test)]
+mod native_agent_deadline_tests {
+    use super::agent_http_timeout;
+    use serde_json::json;
+
+    #[test]
+    fn http_wait_covers_frontend_deadline_and_native_completion_grace() {
+        assert_eq!(
+            agent_http_timeout("ipc", &json!({})).unwrap().as_millis(),
+            125_000
+        );
+        assert_eq!(
+            agent_http_timeout("ipc", &json!({"timeout_ms":600_000}))
+                .unwrap()
+                .as_millis(),
+            605_000
+        );
+        assert_eq!(
+            agent_http_timeout("ipc", &json!({"timeout_ms":1}))
+                .unwrap()
+                .as_millis(),
+            5_001
+        );
+        assert!(agent_http_timeout("ipc", &json!({"timeout_ms":0})).is_err());
+        assert_eq!(
+            agent_http_timeout("evaluate", &json!({"timeout_ms":0}))
+                .unwrap()
+                .as_secs(),
+            60
+        );
     }
 }

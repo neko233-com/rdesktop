@@ -204,6 +204,16 @@ impl Backend {
     }
 
     fn cdp(&self, id: u64, method: &str, params: Value) -> Result<Value, String> {
+        self.cdp_with_timeout(id, method, params, Duration::from_secs(15))
+    }
+
+    fn cdp_with_timeout(
+        &self,
+        id: u64,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         if method.is_empty()
             || method.len() > 160
             || !method
@@ -216,7 +226,7 @@ impl Backend {
         let method = method.to_string();
         let params = params.to_string();
         let (send, receive) = mpsc::sync_channel(1);
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + timeout;
         self.runtime
             .with_window(id, move |_, webview| {
                 if Instant::now() >= deadline {
@@ -261,11 +271,21 @@ impl Backend {
     }
 
     fn evaluate(&self, id: u64, expression: &str) -> Result<Value, String> {
-        let result = self.cdp(
+        self.evaluate_with_timeout(id, expression, Duration::from_secs(15))
+    }
+
+    fn evaluate_with_timeout(
+        &self,
+        id: u64,
+        expression: &str,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let result = self.cdp_with_timeout(
             id,
             "Runtime.evaluate",
             json!({"expression":expression,
             "returnByValue":true,"awaitPromise":true,"userGesture":true,"allowUnsafeEvalBlockedByCSP":true}),
+            timeout,
         )?;
         if result.get("exceptionDetails").is_some() {
             return Err(result["exceptionDetails"].to_string());
@@ -572,7 +592,7 @@ impl Backend {
 
 impl NativeAgentBackend for Backend {
     fn capabilities(&self) -> Value {
-        json!({"uia":{"source":"windows-uia","operations":crate::native_accessibility::OPERATIONS,
+        json!({"ipc":{"timeout_parameter":"timeout_ms","default_timeout_ms":rdesktop_dev::native::IPC_DEFAULT_TIMEOUT_MS,"maximum_timeout_ms":rdesktop_dev::native::IPC_MAX_TIMEOUT_MS,"completion_grace_ms":rdesktop_dev::native::IPC_COMPLETION_GRACE_MS,"cancels_backend":false},"uia":{"source":"windows-uia","operations":crate::native_accessibility::OPERATIONS,
             "scope":"selected registered native window and its descendants", "target_fields":["runtime_id","name","automation_id","control_type","class_name"],
             "collections":{"default_max_items":32,"maximum_max_items":256,"selection_strategies":["provider","items"],"default_scan_max_nodes":1000,"maximum_scan_max_nodes":5000,"default_scan_max_depth":64,"maximum_scan_max_depth":128},
             "relations":["described-by","labeled-by","controller-for","flows-to","flows-from"],
@@ -657,7 +677,10 @@ impl NativeAgentBackend for Backend {
             },
             "screenshot" => self.cdp(id,"Page.captureScreenshot",json!({"format":"png","captureBeyondViewport":false})),
             "reload" => self.cdp(id,"Page.reload",json!({"ignoreCache":true})),
-            "ipc" => self.evaluate(id,&format!("window.__RDESKTOP_INVOKE__({}, {})",json!(string(&params,"cmd")?),params.get("payload").unwrap_or(&Value::Null))),
+            "ipc" => {
+                let timeout = rdesktop_dev::native::ipc_timeout_ms(&params)?;
+                self.evaluate_with_timeout(id, &format!("window.__RDESKTOP_INVOKE__({}, {}, {{timeoutMs:{timeout}}})",json!(string(&params,"cmd")?),params.get("payload").unwrap_or(&Value::Null)), Duration::from_millis(timeout + rdesktop_dev::native::IPC_COMPLETION_GRACE_MS))
+            },
             "window" => {
                 let operation=string(&params,"operation")?.to_string();
                 if operation=="close" { self.runtime.close_window(id).map_err(|e|e.to_string())?;return Ok(json!({"accepted":true})); }
