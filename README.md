@@ -34,6 +34,9 @@ application by default, with authenticated Agent CLI inspection, engine input,
 PNG capture, multi-window targeting and frontend hot reload. The browser preview
 remains available explicitly. See [Native Agent development](docs/NATIVE_AGENT.md)
 for setup, release isolation and the exact limits of hidden-window verification.
+The generated starter includes keyboard submission, persistent labels, live
+results, reflow and system-color support. See [actual NVDA and accessibility
+acceptance](docs/ASSISTIVE_TECHNOLOGY_VALIDATION.md) for tested cases and limits.
 
 The project favors explicit behavior and a small, composable workspace over a single opaque runtime. APIs may change before `1.0.0`.
 

@@ -6,6 +6,9 @@ Windows 开发默认运行真实 Rust 桌面应用：`rdesktop dev`。通过
 浏览器预览使用 `rdesktop dev --browser`。调试服务仅在显式启用的 debug 构建中存在，
 普通 release 构建不能通过环境变量开启。完整接口、构建隔离与验收范围见
 [原生 Agent 开发文档](docs/NATIVE_AGENT.md)。本文后续浏览器接口示例适用于 `--browser`。
+默认项目模板已提供持续可见的标签、回车提交、结果播报、跳转链接、窄窗口重排与系统配色。
+真实 NVDA 朗读、生产 EXE 和自动化检查的已验范围见
+[辅助技术验收记录](docs/ASSISTIVE_TECHNOLOGY_VALIDATION.md)。
 
 [English](README.md) | **简体中文**
 

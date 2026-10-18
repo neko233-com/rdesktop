@@ -17,3 +17,4 @@ tracing-subscriber = "0.3"
 default = ["webview"]
 webview = ["dep:rdesktop-webview"]
 chrome = ["dep:rdesktop-cef"]
+native-agent = ["rdesktop-webview/native-agent"]

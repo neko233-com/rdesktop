@@ -288,86 +288,8 @@ native-agent = ["rdesktop-webview/native-agent"]
     let main_rs = include_str!("../templates/main.rs.txt");
     std::fs::write(project_dir.join("src").join("main.rs"), main_rs)?;
 
-    // Write index.html
-    let index_html = r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>rdesktop App</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            color: white;
-        }
-        .container { text-align: center; padding: 2rem; }
-        h1 { font-size: 3rem; margin-bottom: 1rem; }
-        p { font-size: 1.2rem; opacity: 0.9; margin-bottom: 2rem; }
-        .card {
-            background: rgba(255,255,255,0.1);
-            backdrop-filter: blur(10px);
-            border-radius: 16px;
-            padding: 2rem;
-            margin: 1rem auto;
-            max-width: 400px;
-        }
-        input {
-            padding: 8px 12px;
-            border: none;
-            border-radius: 8px;
-            font-size: 1rem;
-            margin-right: 8px;
-        }
-        button {
-            padding: 8px 16px;
-            border: none;
-            border-radius: 8px;
-            background: #667eea;
-            color: white;
-            font-size: 1rem;
-            cursor: pointer;
-        }
-        button:hover { background: #5a6fd6; }
-        #result { margin-top: 1rem; font-size: 1.1rem; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Hello rdesktop!</h1>
-        <p>Your app is running.</p>
-        <div class="card">
-            <h2>IPC Demo</h2>
-            <input type="text" id="nameInput" placeholder="Enter your name" />
-            <button onclick="greet()">Greet</button>
-            <div id="result"></div>
-        </div>
-    </div>
-    <script>
-        // rdesktop IPC bridge (works in both browser and native mode)
-        async function invoke(cmd, payload) {
-            if (!window.__RDESKTOP_INVOKE__) throw Error('rdesktop bridge unavailable');
-            return window.__RDESKTOP_INVOKE__(cmd, payload);
-        }
-
-        async function greet() {
-            const name = document.getElementById('nameInput').value || 'World';
-            try {
-                const result = await invoke('greet', { name });
-                document.getElementById('result').textContent = result.data?.message || result.message || 'Done';
-            } catch (e) {
-                document.getElementById('result').textContent = 'Error: ' + e.message;
-            }
-        }
-    </script>
-</body>
-</html>
-"##;
+    // Keep the generated UI reviewable and packaged with the CLI.
+    let index_html = include_str!("../templates/index.html");
     std::fs::write(project_dir.join("frontend").join("index.html"), index_html)?;
 
     println!("Created new rdesktop project: {}", name);

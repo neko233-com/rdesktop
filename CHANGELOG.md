@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+The CLI-generated starter and Hello World now provide persistent labels,
+semantic landmarks, a visible keyboard skip link, Enter submission and live
+Rust results. Host errors and missing bridges are reported accurately. Opaque
+high-contrast surfaces, responsive reflow, reduced motion and forced system
+colors are covered by 14 native checks per application and visibility mode,
+including four complete axe audits without exclusions or incomplete results.
+
+Hello World now supports native Agent development and real frontend hot reload;
+its normal release uses the Windows GUI subsystem and ignores development URL
+switches. Production isolation checks accept any owned application EXE and
+verify its GUI subsystem alongside transport/inspector absence.
+
+Actual NVDA 2026.2 output was tested with native Windows keyboard input, UIA
+actions and production EXEs. The baseline starter's missing Enter behavior and
+unannounced results were reproduced before repair. The exact matrix, tested
+binaries and remaining assistive-technology acceptance are documented in
+[assistive technology validation](docs/ASSISTIVE_TECHNOLOGY_VALIDATION.md).
+
 ## 0.1.12
 
 The native Agent discovers renderer-owned Windows dialogs with opaque lifetime

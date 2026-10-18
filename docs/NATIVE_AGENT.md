@@ -313,8 +313,10 @@ Windows may expose only its outer UIA providers while a window is hidden. The
 test fixture exposes 102 UIA nodes visibly and seven while hidden; its real
 engine AX tree retains 145 nodes in both modes. These are distinct reported
 sources. The framework does not manufacture hidden OS accessibility nodes or
-silently show a window to populate them. Narrator/NVDA speech is a separate
+silently show a window to populate them. Screen-reader speech is a separate
 manual acceptance check, not an inference from an AX snapshot or axe report.
+Actual NVDA 2026.2 output, including a production EXE and the generated starter,
+is recorded in [assistive technology acceptance](ASSISTIVE_TECHNOLOGY_VALIDATION.md).
 
 `screenshot` contains WebView content; `native-screenshot` contains the selected
 visible native window. Neither captures arbitrary other applications. Real
@@ -322,7 +324,8 @@ message-box and WebView2 file-picker inspection, native cancellation and
 compositor frames have separate acceptance checks. Unsupported/unrelated OS
 windows still fail explicitly. Engine input is not physical Windows input.
 Desktop recordings capture the entire virtual desktop, not a hidden WebView.
-External file-drop input and Narrator/NVDA speech require further acceptance.
+External file-drop input, Narrator and untested screen-reader cases require
+further acceptance; the linked NVDA matrix describes the observed cases.
 Browser preview cannot prove those OS behaviors.
 
 ## Repeatable verification
