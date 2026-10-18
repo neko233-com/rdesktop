@@ -19,6 +19,8 @@ const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NODE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TIMEOUT: Duration = Duration::from_secs(120);
 const WORKER: &str = include_str!("worker.cjs");
+const MODULES: &str = include_str!("modules.cjs");
+pub mod renderer;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
@@ -68,6 +70,7 @@ pub struct NodeRuntime {
     metadata: NodeMetadata,
     timeout: Duration,
     process_id: u32,
+    module_mode: bool,
 }
 
 struct Worker {
@@ -140,6 +143,16 @@ fn verified_executable(config: &NodeConfig) -> Result<(PathBuf, File), NodeError
 
 impl NodeRuntime {
     pub fn start(config: NodeConfig) -> Result<Self, NodeError> {
+        Self::start_mode(config, false)
+    }
+
+    /// Project Node modules into a native renderer. The preload is selected and
+    /// bounded here, but executed by that renderer, where its DOM/callbacks live.
+    pub fn start_modules(config: NodeConfig) -> Result<Self, NodeError> {
+        Self::start_mode(config, true)
+    }
+
+    fn start_mode(config: NodeConfig, module_mode: bool) -> Result<Self, NodeError> {
         valid_timeout(config.timeout)?;
         let root = fs::canonicalize(&config.package_root)?;
         let preload = fs::canonicalize(&config.preload)?;
@@ -155,11 +168,18 @@ impl NodeRuntime {
         }
         let (executable, verified_file) = verified_executable(&config)?;
         let mut command = Command::new(executable);
+        let source = format!("\"use strict\";\n{MODULES}\n{WORKER}");
         command
-            .args(["--input-type=commonjs", "--eval", WORKER])
+            .args(["--input-type=commonjs", "--eval", &source])
             .env_remove("NODE_OPTIONS")
             .env_remove("NODE_PATH")
             .env_remove("ELECTRON_RUN_AS_NODE")
+            .env_remove("IHUB_SIGNING_PRIVATE_KEY")
+            .env_remove("IHUB_SIGNING_PRIVATE_KEY_PASSWORD")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("NPM_TOKEN")
+            .env_remove("NODE_AUTH_TOKEN")
             .current_dir(&root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -242,7 +262,7 @@ impl NodeRuntime {
         };
         let result = worker.exchange(
             "load",
-            json!({"root":root,"preload":preload}),
+            json!({"root":root,"preload":preload,"modules":module_mode}),
             config.timeout,
         )?;
         let metadata: NodeMetadata = serde_json::from_value(result)
@@ -257,6 +277,7 @@ impl NodeRuntime {
             metadata,
             timeout: config.timeout,
             process_id,
+            module_mode,
         })
     }
 
@@ -265,6 +286,21 @@ impl NodeRuntime {
     }
     pub fn process_id(&self) -> u32 {
         self.process_id
+    }
+
+    /// Bounded module protocol used by the renderer bridge, never exposed as
+    /// application IPC to unrelated pages. Trusted modules retain Node authority.
+    pub fn module_request(&self, request: Value) -> Result<Value, NodeError> {
+        if !self.module_mode {
+            return Err(NodeError::Configuration(
+                "worker is not in renderer module mode".into(),
+            ));
+        }
+        let mut worker = self.worker.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => NodeError::Busy,
+            TryLockError::Poisoned(_) => NodeError::Closed,
+        })?;
+        worker.exchange("module", json!({"request":request}), self.timeout)
     }
 
     /// Call a preload's exported function on a worker thread, not a UI thread.

@@ -1,0 +1,25 @@
+const fs=require('node:fs'),path=require('node:path');
+const helper=require('./helper.cjs'),cycle=require('./cycle-a.cjs');
+const loadedWithDocument=document.nodeType===9;
+window.runChecks=async()=>{
+  const checks={loadedWithDocument,commonjsCached:helper===require('./helper.cjs'),commonjsThis:helper.commonjsThis,cycle:cycle.value==='a:b:a'};
+  const target=path.join(__dirname,'真实 中文.txt'),text=document.querySelector('#message').value;
+  fs.writeFileSync(target,text+' 中文');
+  checks.sync=fs.readFileSync(target,'utf8')===text+' 中文';
+  checks.stat=fs.statSync(target).isFile()&&!fs.statSync(target).isDirectory();
+  const bytes=fs.readFileSync(target);
+  checks.buffer=bytes instanceof Uint8Array&&Buffer.isBuffer(bytes)&&bytes.toString('utf8')===text+' 中文'&&Buffer.from(bytes.toString('base64'),'base64').equals(bytes);
+  checks.nodeBuffer=require('node:buffer').Buffer.isBuffer(bytes)&&require('node:buffer').Buffer.from('中文').toString()==='中文';
+  checks.callback=await new Promise((resolve,reject)=>fs.readFile(target,(error,value)=>error?reject(error):resolve(value.toString()===text+' 中文')));
+  checks.promise=await fs.promises.readFile(target,'utf8')===text+' 中文';
+  checks.callbackError=await new Promise(resolve=>fs.readFile(path.join(__dirname,'missing'),error=>resolve(error instanceof Error&&error.code==='ENOENT')));
+  try{fs.statSync(path.join(__dirname,'missing'));checks.typedError=false;}catch(error){checks.typedError=error.code==='ENOENT';}
+  const {EventEmitter}=require('node:events'),emitter=new EventEmitter();let event;
+  emitter.once('real-event',value=>{event=value;});emitter.emit('real-event','节点事件');
+  emitter.custom={value:13};checks.properties='custom' in emitter&&Object.hasOwn(emitter,'custom')&&!Object.hasOwn(emitter,'notPresent')&&Object.keys(emitter).includes('custom')&&emitter.custom.value===13;delete emitter.custom;checks.delete=!('custom' in emitter);
+  await new Promise(resolve=>setTimeout(resolve,50));checks.event=event==='节点事件';
+  checks.child=await new Promise((resolve,reject)=>require('node:child_process').execFile(process.execPath,['-e','process.stdout.write("real-node-child")'],(error,stdout)=>error?reject(error):resolve(stdout==='real-node-child')));
+  checks.realNode=!!process.versions.node&&process.versions.electron===undefined;
+  checks.domCallback=document.querySelector('#message').value===text;
+  return{checks,passed:Object.values(checks).every(value=>value===true),node:process.versions.node,electron:process.versions.electron??null};
+};

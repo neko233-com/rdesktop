@@ -55,12 +55,99 @@ Wrapping objects preserves a plugin's own `$rdesktop` keys. Cycles, non-finite
 numbers, excessive nesting and unsupported object types fail explicitly. Errors
 preserve name/message/code without replacing them with successful empty values.
 
+## Experimental native renderer module mode
+
+Unreleased `main` also provides `NodeRuntime::start_modules` and
+`rdesktop_node::renderer::RendererBridge`. The original CommonJS preload and its
+JavaScript dependencies execute in the actual WebView2 document. Their `window`,
+DOM, closures, synchronous callbacks between JavaScript modules, module cache and
+CommonJS cycles therefore remain in that document. Node built-ins and native
+objects use a separate, explicitly selected Node worker. Electron supplies none
+of the renderer, input, UIA provider or window lifecycle in this mode.
+
+`RendererBridge::start(config, "index.html")` returns `url()` and
+`initialization_script()`. Give these to `NativeWindowOptions` on a worker through
+`NativeRuntime::create_window`. Keep the bridge alive for that one document and
+drop it when the document retires. A reload needs a new bridge; a second document
+cannot attach to the first document's module/callback table. The example
+`examples/node_plugin` shows this wiring without adding it to the CLI or starters.
+
+The loopback service binds only `127.0.0.1`, uses a random 256-bit capability,
+requires the exact Host and Origin plus a custom capability header, and binds
+Node calls to the first attached document identity. It supplies no CORS grant.
+Remote frames do not receive the initialization script. The default local CSP
+also blocks remote page networking; this is not an Electron network-compatibility
+claim. Node modules retain their explicitly trusted Node network authority.
+
+The renderer issues this browser request sequence against its private `__node`
+endpoint: `attach`, `resolve`, `get`/`call`/`descriptor`, and `events`; released
+object identities use `release`. RPC is POST only. The private worker envelope is
+not an application IPC command and unrelated origins/methods/leases are rejected.
+WinSock accepted sockets explicitly return to blocking mode before bounded reads;
+a split-header regression reproduces the former inherited-FIONBIO failure.
+
+Current bounds: 4 MiB RPC frames, 16 MiB assets, 1 MiB CommonJS sources, 4096 Node
+references, 256 renderer callbacks and 256 queued events; renderer worker calls
+must use deadlines of at most five seconds. HTTP headers/body have a five-second
+total read deadline. Node references use browser GC release hints, callbacks and
+Promises return through a scoped event queue, and errors preserve name/code.
+Buffer results are real browser `Uint8Array` values with a partial Buffer facade.
+The facade covers the measured encoding/transfer contracts, not every Node Buffer
+method. A full authority plugin is not a filesystem or subprocess sandbox.
+
+Native verification is repeatable, with all evidence outside the checkout:
+
+```powershell
+$env:RDESKTOP_TEST_NODE = (Get-Command node).Source
+$env:RDESKTOP_TEST_NODE_SHA256 = (Get-FileHash -LiteralPath $env:RDESKTOP_TEST_NODE -Algorithm SHA256).Hash.ToLowerInvariant()
+cargo build -p node_plugin --features native-agent
+node scripts/verify-node-plugin-native.mjs fixture "$env:TEMP/rdesktop-node-acceptance"
+node scripts/verify-node-plugin-native.mjs fixture "$env:TEMP/rdesktop-node-acceptance" --headless
+node scripts/verify-node-plugin-native.mjs public "$env:TEMP/rdesktop-node-acceptance" C:\path\to\immutable\utools-file-to-folder
+```
+
+The public case requires the original ISC repository at commit
+`8a3f257591935cf4d2dd4baa599f3c20fc1b7e5d`. It hashes every tracked file before
+and after, uses real UIA Value/Invoke and label relations, creates only a fresh
+absolute temporary directory through the original preload, and normally exits.
+Its example supplies a small fixture uTools host adapter (folder context,
+notification and exit), not a complete uTools SDK. Do not mistake that adapter
+for iHub's finished lifecycle, file picker, theme or detach implementation.
+
+The fixture case covers synchronous fs/Stats methods, module identity/cycles and
+top-level `this`, callbacks, errors, Promise results, EventEmitter, property
+descriptors/mutation, byte buffers, DOM closures and a real hidden Node child.
+Both modes inspect the actual owned process tree for Node and WebView2, reject
+Electron descendants, and require the owned Node worker to exit normally.
+
+Windows x64 acceptance on 2026-10-18 used Node 24.19.0. The current fixture passed
+18 checks in visible and hidden native windows; the original public package
+passed UIA Value/Invoke, label relation, byte-preservation and real mkdir checks.
+The accepted-socket fix also passed eight consecutive native fixture runs. The
+20 explicit Node tests (including the four module/service tests) and the full
+workspace's native-agent build/test/clippy checks passed.
+
+The release example additionally passed the same 18 checks through real Windows
+accessibility input. It contained no Agent/session/headless/UIA debug markers,
+ignored injected debug environment variables and created no Agent session or
+debug navigation. It exited normally with code zero. That standalone EXE was
+1971200 bytes (SHA-256
+`4e7889015e486f88ca4d70bfce8435d701a99d10a73182f6d4288550205cc196`),
+excluding the separately selected Node executable and installed system WebView2.
+This is an example measurement, not an iHub installer size or Authenticode claim.
+The workspace lock adds only the local example package; no new external resolved
+dependency, Node binary or second browser was added to the default CLI payload.
+
 ## Remaining integration gates
 
-The current primitive does not project DOM objects, preload callbacks, Electron
-APIs, lifecycle events or Node objects into a renderer. It does not yet replace
-iHub's Electron runtime, ship a production Node executable, or establish native
-addon ABI compatibility.
+The direct worker mode has no DOM. The renderer mode is experimental: it does
+not yet replace iHub's Electron runtime, ship a production Node executable, or
+establish native addon ABI compatibility. ESM, arbitrary synchronous return
+values from callbacks into Node, full Buffer/prototype semantics, complete
+callback disposal and application-owned subprocess lifecycle remain incomplete.
+Loading a native addon is delegated to the selected Node ABI and has not been
+accepted as universal addon compatibility. Electron API adapters, uTools host
+lifecycle, native dialogs, drag/drop/file paths and detach/adopt are still gates.
 
 Before claiming that migration is complete:
 

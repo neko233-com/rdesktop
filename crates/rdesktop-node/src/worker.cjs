@@ -25,7 +25,7 @@ if (process.platform === "win32") {
 }
 const window = Object.create(null);
 Object.defineProperty(globalThis, "window", { value: window });
-let loaded = false, closing = false;
+let loaded = false, closing = false, modules = null;
 function nodePath(value) {
   // Rust canonicalize returns extended Windows paths. CommonJS resolution
   // needs a drive/UNC path; Node adds the extended prefix for filesystem I/O.
@@ -88,7 +88,8 @@ async function request(message) {
     }
     process.chdir(root);
     loaded = true;
-    require(preload);
+    if (message.modules === true) modules = createModuleRuntime(root, preload);
+    else require(preload);
     const names = Object.keys(window);
     if (names.length > 256 || names.some(name => name.length > 256)) throw new RangeError("Too many preload exports.");
     const functions = names.filter(name => typeof window[name] === "function");
@@ -96,6 +97,11 @@ async function request(message) {
       node: process.versions.node, electron: process.versions.electron ?? null,
       functions,
     });
+    return;
+  }
+  if (message.operation === "module") {
+    if (!loaded || !modules) throw new Error("Renderer module runtime is not loaded.");
+    reply(message.id, true, modules.request(message.request));
     return;
   }
   if (message.operation === "call") {

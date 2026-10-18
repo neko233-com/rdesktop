@@ -1804,6 +1804,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
+name = "node_plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rdesktop-core",
+ "rdesktop-node",
+ "rdesktop-webview",
+ "serde_json",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

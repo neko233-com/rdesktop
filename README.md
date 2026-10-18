@@ -30,8 +30,9 @@ Windows 10/11 x64. Other platforms require separate runtime acceptance.
 ## Project status
 
 Node/Electron plugin migration is a separate, incomplete capability. The new
-unpublished `rdesktop-node` execution primitive does not yet replace an Electron
-plugin renderer; see the [native plugin runtime status and acceptance gates](docs/PLUGIN_RUNTIME.md).
+unpublished `rdesktop-node` module bridge now has a native WebView2/CommonJS
+acceptance example. It has not replaced iHub's Electron renderer or completed
+Electron/uTools API compatibility; see the [native plugin runtime status and acceptance gates](docs/PLUGIN_RUNTIME.md).
 
 rdesktop is an active `0.1.x` project. Windows development now runs the real native
 application by default, with authenticated Agent CLI inspection, engine input,
