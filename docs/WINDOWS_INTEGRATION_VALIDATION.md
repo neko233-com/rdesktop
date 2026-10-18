@@ -1,5 +1,30 @@
 # Windows integration validation
 
+## Empty custom-frame Alt menu regression (2026-10-19)
+
+iHub's native Node fixture could finish its 36 binary-memory cases when first
+observed through UIA, while an immediate concurrent CDP query timed out. A
+passive REA/Frida attach after the failure found the host in `SC_KEYMENU` with
+`lParam=0` and the owned plugin browser in `WM_SYSKEYUP/VK_MENU`. Windows GUI
+state reported menu flags 12 and a menu owner despite no visible menu. Clicking
+an empty area normally cancelled it: menu flags became zero, CDP responded,
+and all 36 cases completed. The Node bridge was not the blocking operation.
+
+Evidence references: `ev_00195ed06465caadf62db05ed8a49c16361c4c6b743006bd42e314db39e40a17`
+(host modules/offsets), `ev_009452368d7d47d83f2c60d4e354740cc86744f9f4b7833011f84e5470c293c4`
+(owned browser), `ev_00b4715237fee7afe61ae1bf1a6233d6d31f321007cbd0c5256e9c8482180b3f`
+(menu state), and `ev_be88475709188e35a030ab0c8b66480e5ea18ec1d85be43b4f283335ad415788`
+(normal cancellation). REA did not supply artifact identity; process ownership
+was separately checked against the running development executable and plugin
+WebView2 profile. Local PDB symbolization mapped the host stack to
+`frame_proc`, Wry's parent subclass, and Tao's default window procedure.
+
+The repeatable native command fixture failed before the guard with
+`enteredMenuMode=true`, then passed with bare Alt outside menu mode and the
+Alt+Space command still entering menu mode. Both menu paths are observed
+before any cleanup. Full workspace tests, clippy, native Agent integration and
+UIA action checks pass on Windows x64. Generated captures remain outside Git.
+
 ## Modal UI dispatch regression (2026-10-18)
 
 `NativeRuntime::with_window` is a synchronous query with a 30-second reply

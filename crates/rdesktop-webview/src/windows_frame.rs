@@ -17,6 +17,7 @@ use windows_sys::Win32::{
 
 const CLASS_NAME: windows_sys::core::PCWSTR = windows_sys::core::w!("RdesktopResizeBorder");
 const MOVE_RESIZE_STARTED: isize = 4;
+const DECORATED: isize = 8;
 
 fn edge_at(x: i32, y: i32, width: i32, height: i32, border: i32, corner: i32) -> u32 {
     if x < 0 || y < 0 || x >= width || y >= height {
@@ -164,6 +165,19 @@ unsafe extern "system" fn frame_proc(
     child: usize,
 ) -> LRESULT {
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    if msg == WM_SYSCOMMAND && (wp & 0xfff0) == SC_KEYMENU as usize && lp == 0 {
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+        let flags = unsafe { GetWindowLongPtrW(child as HWND, GWLP_USERDATA) };
+        // Tao keeps WS_CAPTION on undecorated top-level windows for native
+        // frame behavior. Track its actual decoration state independently.
+        if flags & DECORATED == 0 && style & WS_CHILD == 0 && unsafe { GetMenu(hwnd) }.is_null() {
+            // Bare Alt/F10 must not enter an invisible menu loop on a custom
+            // frame without a menu bar. A WebView's synchronous Alt-up message
+            // can otherwise wait in that loop and stall its browser/CDP thread.
+            // Keep Alt+Space, decorated windows and application menus native.
+            return 0;
+        }
+    }
     if msg == WM_NCDESTROY {
         unsafe {
             RemoveWindowSubclass(hwnd, Some(frame_proc), id);
@@ -262,7 +276,9 @@ impl NativeResizeBorder {
                 GWLP_USERDATA,
                 // windows-sys aliases this API to SetWindowLongW on x86.
                 // The flags fit both its i32 value and the x64 isize value.
-                (u8::from(has_min) | (u8::from(has_max) << 1)) as _,
+                (isize::from(has_min)
+                    | (isize::from(has_max) << 1)
+                    | if window.is_decorated() { DECORATED } else { 0 }) as _,
             );
             if windows_sys::Win32::UI::Shell::SetWindowSubclass(
                 window.hwnd() as HWND,
@@ -283,6 +299,17 @@ impl NativeResizeBorder {
     }
 
     pub(crate) fn update(&self, window: &Window) -> io::Result<()> {
+        let flags = unsafe { GetWindowLongPtrW(self.hwnd, GWLP_USERDATA) };
+        let decorated = if window.is_decorated() {
+            flags | DECORATED
+        } else {
+            flags & !DECORATED
+        };
+        if flags != decorated {
+            unsafe {
+                SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, decorated as _);
+            }
+        }
         let size = window.inner_size();
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96);
         let enabled = !window.is_decorated()
@@ -372,6 +399,15 @@ mod tests {
         }
         assert!(border.take_move_resize_start());
         assert!(!border.take_move_resize_start());
+        assert_eq!(unsafe { GetWindowLongPtrW(border.hwnd, GWLP_USERDATA) }, 3);
+        window.set_decorations(true);
+        border.update(&window).unwrap();
+        assert_eq!(
+            unsafe { GetWindowLongPtrW(border.hwnd, GWLP_USERDATA) },
+            3 | DECORATED
+        );
+        window.set_decorations(false);
+        border.update(&window).unwrap();
         assert_eq!(unsafe { GetWindowLongPtrW(border.hwnd, GWLP_USERDATA) }, 3);
         unsafe {
             SendMessageW(window.hwnd() as HWND, WM_ENTERSIZEMOVE, 0, 0);
