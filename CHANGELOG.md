@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.11
+
+Native UIA now reads grid cells, merged spans, table/cell headers, selected-item
+collections and their owner controls. Returned native elements must prove
+ancestry inside the selected registered window. Collection limits and truncation
+are explicit; invalid coordinates and unsupported patterns fail. Inspection
+adds Grid/GridItem/Table, Dock, MultipleView, Selection2, Transform2 and Legacy
+states, with password values still redacted. Agent capabilities advertise the
+new operations and bounded collection parameters.
+
+An explicit native SelectionItem scan handles providers whose selected-item
+collection disagrees with their item flags, while retaining the original
+collection as a separate strategy. Scan limits are independent of target-search
+limits; incomplete scans never claim a complete total. UIA tree walking now
+preserves successful null COM results and propagates actual provider failures.
+
+The new fixture verifies 14 groups of real Grid/Table/Selection behavior and
+scope checks, alongside the existing visible/hidden native and accessibility
+regressions. Its axe audit has no violations but retains incomplete contrast
+results for merged/native-select rendering; separate rendered-color checks
+measure at least 8.17:1, and actual native visual review confirms legibility.
+These results do not constitute Narrator/NVDA speech or external-dialog
+acceptance. Provider discrepancies and repeatable checks are documented in
+[the native contract](docs/NATIVE_AGENT.md).
+
 ## 0.1.10
 
 The native Agent now drives Windows UI Automation through real COM patterns:
