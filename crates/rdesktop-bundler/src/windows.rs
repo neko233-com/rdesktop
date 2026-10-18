@@ -171,6 +171,9 @@ impl WindowsBundler {
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 Unicode true
+; Compress installer payloads without modifying the installed executable.
+SetCompressor /SOLID lzma
+SetCompressorDictSize 32
 
 Name "{name}"
 OutFile "{output}"
@@ -282,7 +285,7 @@ SectionEnd
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" Platform="x64" />
 
     <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
-    <MediaTemplate EmbedCab="yes" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
     <Property Id="REBOOT" Value="ReallySuppress" />
     {icon_definition}

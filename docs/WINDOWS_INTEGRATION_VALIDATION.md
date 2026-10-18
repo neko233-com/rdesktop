@@ -1,5 +1,19 @@
 # Windows integration validation
 
+## Installer compression (2026-10-19)
+
+Windows installers now use NSIS solid LZMA with a 32 MiB dictionary and WiX
+high cabinet compression. These are features of the existing installer tools;
+no executable packer, embedded WebView2 or runtime dependency is added. The
+installed executable and resources retain their original bytes.
+
+The full workspace checks and bundler clippy passed. The opted-in real compiler
+test also passed with NSIS 3.11 and WiX 3.14.1. Its unsigned QA NSIS and MSI
+were 426100 and 409600 bytes respectively; they were never installed or run.
+WiX `dark.exe` extracted the compressed MSI's `EXE`, whose SHA-256 matched the
+original fixture executable (`4259168cddbff108ae4244449427813af69a676f8b89e740e2b39eee05442f77`).
+These fixture sizes are not predictions for application installers.
+
 ## Empty custom-frame Alt menu regression (2026-10-19)
 
 iHub's native Node fixture could finish its 36 binary-memory cases when first
