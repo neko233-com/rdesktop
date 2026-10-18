@@ -211,10 +211,11 @@ async fn info(State(state): State<AgentState>) -> Json<Value> {
     Json(
         json!({"framework": "rdesktop", "version": state.session.version,
         "pid": state.session.pid, "mode": state.session.mode,
-        "commands": ["windows", "dom", "elements", "state", "accessibility", "uia", "audit", "evaluate", "action", "cdp", "events", "screenshot", "window", "reload", "ipc", "exit", "recording"],
+        "commands": ["windows", "native-windows", "native-screenshot", "dom", "elements", "state", "accessibility", "uia", "audit", "evaluate", "action", "cdp", "events", "screenshot", "window", "reload", "ipc", "exit", "recording"],
         "capabilities": state.backend.capabilities(),
         "input": "CDP engine input and declared owned-window UIA patterns; external OS file-drop requires desktop verification",
-        "screenshot": "native WebView content PNG; excludes OS dialogs and title bar"}),
+        "screenshot": "WebView content PNG; excludes OS dialogs and title bar",
+        "native-screenshot": "Windows compositor PNG of one registered renderer or discovered owned native window; requires visible, non-minimized window; frame headers only when stable DWM bounds match pixels"}),
     )
 }
 
@@ -236,8 +237,9 @@ async fn read(
     let params = query
         .into_iter()
         .map(|(key, value)| {
-            let parsed = if command == "uia"
-                && ["max_nodes", "max_depth", "patterns"].contains(&key.as_str())
+            let parsed = if (command == "uia"
+                && ["max_nodes", "max_depth", "patterns"].contains(&key.as_str()))
+                || (command == "native-windows" && key == "max_windows")
             {
                 serde_json::from_str(&value).unwrap_or(Value::String(value))
             } else {
@@ -249,6 +251,7 @@ async fn read(
     if !matches!(
         command.as_str(),
         "windows"
+            | "native-windows"
             | "dom"
             | "elements"
             | "state"
@@ -256,6 +259,7 @@ async fn read(
             | "uia"
             | "events"
             | "screenshot"
+            | "native-screenshot"
             | "recording"
     ) {
         return failure(StatusCode::METHOD_NOT_ALLOWED, "use POST for this command");
@@ -281,7 +285,8 @@ async fn dispatch(state: AgentState, command: String, params: Value) -> Response
     let Ok(permit) = state.capacity.clone().try_acquire_owned() else {
         return failure(StatusCode::TOO_MANY_REQUESTS, "native agent is busy");
     };
-    let screenshot = command == "screenshot";
+    let screenshot = matches!(command.as_str(), "screenshot" | "native-screenshot");
+    let native_screenshot = command == "native-screenshot";
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         state.backend.request(&command, params)
@@ -308,7 +313,32 @@ async fn dispatch(state: AgentState, command: String, params: Value) -> Response
                     "native response exceeds 32 MiB",
                 );
             }
-            Response::builder()
+            let mut response = Response::builder();
+            if screenshot {
+                response = response.header(
+                    "x-rdesktop-capture-source",
+                    if native_screenshot {
+                        "windows-graphics-capture"
+                    } else {
+                        "webview-content"
+                    },
+                );
+            }
+            if native_screenshot {
+                for key in ["width", "height"] {
+                    if let Some(value) = value[key].as_u64() {
+                        response =
+                            response.header(format!("x-rdesktop-capture-{key}"), value.to_string());
+                    }
+                }
+                for key in ["x", "y", "width", "height"] {
+                    if let Some(value) = value["frame"][key].as_i64() {
+                        response =
+                            response.header(format!("x-rdesktop-frame-{key}"), value.to_string());
+                    }
+                }
+            }
+            response
                 .header(
                     header::CONTENT_TYPE,
                     if screenshot {

@@ -7,6 +7,10 @@
 mod native_accessibility;
 #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
 mod native_agent;
+#[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+mod native_capture;
+#[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+mod native_windows;
 pub mod renderer;
 pub mod runtime;
 pub use runtime::{NativeEvent, NativeEventHandler, NativeRuntime};

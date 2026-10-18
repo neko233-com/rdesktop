@@ -11,7 +11,7 @@ const output=resolve(process.argv[2]??'.cache/release-isolation');await mkdir(ou
 const executable=resolve('target/release/native_agent.exe');const bytes=await readFile(executable);
 // The fixture's own UI state reporter is ordinary app code; the framework
 // environment switches, session transport and OS inspector must be absent.
-const markers=['RDESKTOP_AGENT_SESSION','RDESKTOP_HEADLESS','RDESKTOP_DEV_URL','/__rdesktop__/agent/','windows-uia'];
+const markers=['RDESKTOP_AGENT_SESSION','RDESKTOP_HEADLESS','RDESKTOP_DEV_URL','/__rdesktop__/agent/','windows-uia','owned-native-window','windows-graphics-capture'];
 for(const marker of markers)assert(!bytes.includes(Buffer.from(marker)),`release contains debug marker ${marker}`);
 assert(!/RDESKTOP_AGENT(?!_STATE__)/.test(bytes.toString('latin1')),'release contains native Agent activation');
 let requests=0;const probe=createServer((_req,res)=>{requests++;res.end('unexpected debug navigation');});

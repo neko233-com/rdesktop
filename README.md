@@ -86,6 +86,7 @@ The development server supports:
 - application state snapshots and IPC requests;
 - hot reload when frontend files change;
 - native screenshot publication with optional wait-for-paint semantics;
+- real Windows UIA patterns and owned OS dialogs, with compositor PNG frames and validated screen coordinates;
 - a local HTTP API that works with Playwright, Puppeteer, MCP tools, or ordinary scripts.
 
 ### Synchronous and asynchronous IPC

@@ -78,7 +78,8 @@ Read commands also support GET with `window` and `selector` query parameters.
 
 | Command | Parameters / result |
 | --- | --- |
-| `windows` | Live IDs, URLs, titles, visibility/focus/state, DPI, physical client/outer bounds |
+| `windows` | Live IDs, engine-event URLs, Win32 titles/visibility/focus/state, process ID, DPI, physical client/outer and DWM frame bounds; reads remain available during native modals |
+| `native-windows` | `window`, optional `max_windows` 1..64 (default 32); discover owned native windows with opaque lifetime IDs, including verified OS broker dialogs |
 | `dom` | Actual HTML, URL, title and readiness from the selected native WebView |
 | `elements` | `selector`; bounded elements with bounds, font/colors, labels, visibility and values |
 | `state` | Viewport, focused markup and the app's optional `window.__RDESKTOP_AGENT_STATE__` |
@@ -90,6 +91,7 @@ Read commands also support GET with `window` and `selector` query parameters.
 | `cdp` | `method`, `params`; raw WebView2 CDP call, including accessibility, network, performance and detailed input |
 | `events` | Last 512 engine console, exception, log, failed-network, Accessibility and intercepted-drag events; sequence strings and optional window filter |
 | `screenshot` | Real WebView content as PNG, including hidden startup windows |
+| `native-screenshot` | Windows Graphics Capture PNG of the selected renderer's OS frame, or its discovered `native_window`; requires visible, non-minimized window |
 | `window` | `operation`: show/hide/focus/minimize/restore/maximize/resize/zoom/close; resize uses logical pixels, zoom accepts `factor` 0.25..5 |
 | `reload` | Reload the selected WebView without restarting Rust |
 | `ipc` | `cmd`, `payload`; traverses the selected WebView's real IPC bridge |
@@ -151,6 +153,55 @@ The UIA root's current process ID and native handle must match the selected
 owned window before descendants are traversed. Values are returned only when
 UIA explicitly identifies a control as non-password; an unknown password
 property is redacted too.
+Snapshot process IDs and hexadecimal `native_window_handle` values are
+diagnostic metadata only; they are not accepted action targets.
+
+### Native dialogs and full window frames
+
+`native-windows` discovers windows under the selected renderer's native owner
+chain. It scans only the host, the browser process obtained from WebView2 COM,
+and physically embedded child-window processes. Windows can create a file
+picker in a separate, short-lived OS broker process: those exact windows must
+also appear as immediate raw UIA children of the renderer. No desktop-root UIA
+search, process-name allowlist or arbitrary HWND/PID target is accepted.
+Registered secondary renderers remain separate scopes. Discovery is bounded
+by a two-second traversal budget, thread/child caps and the requested window
+limit, and reports `truncated` when incomplete. Provider calls have their own
+timeouts and can overrun the traversal budget.
+
+Use a fresh opaque ID from discovery, for example:
+
+```json
+{"window":"1","native_window":"native-4","operation":"snapshot"}
+```
+
+Pass that object to `uia`; use its current provider runtime IDs for native
+pattern actions. Pass `window` and `native_window` to `native-screenshot` to
+capture the dialog. A lifetime property, current process ID, owner chain and
+broker UIA relation are rechecked. Closing or reparenting a dialog expires its
+ID; a reused HWND cannot revive it. Windows may also expose owned dialogs in
+their renderer owner's raw UIA ancestry. That real relationship is preserved.
+The native-dialog input permit is separate from pending renderer input, so a
+modal can be canceled while the opening click remains outstanding.
+
+`native-screenshot` uses Windows Graphics Capture directly, without selecting a
+desktop region, showing a hidden window or activating it. It includes the OS
+frame, limits capture to 16,777,216 pixels and needs Windows 10 1903+ with a
+supported graphics session. It returns PNG bytes with
+`x-rdesktop-capture-source: windows-graphics-capture` and pixel width/height
+headers. `x-rdesktop-frame-x/y/width/height` are included only when DWM screen
+bounds remain stable throughout capture and exactly match its pixel size.
+When those headers are absent, refresh discovery before mapping image pixels
+to screen coordinates. Invisible resize borders in `outer` are not a capture
+origin. The WebView-only `screenshot` remains available in hidden mode and
+reports `x-rdesktop-capture-source: webview-content`.
+
+For application code that opens a native modal, use
+`NativeRuntime::dispatch_window(id, callback)` to queue the window-bound UI
+operation. Acceptance means queued; a window closed before execution is
+skipped. Unlike synchronous `with_window`, a modal's lifetime is not limited
+by the caller's 30-second response deadline. OS inspector and capture modules
+remain gated by Windows, debug assertions and the `native-agent` feature.
 
 ### Native UIA operations
 
@@ -265,11 +316,14 @@ sources. The framework does not manufacture hidden OS accessibility nodes or
 silently show a window to populate them. Narrator/NVDA speech is a separate
 manual acceptance check, not an inference from an AX snapshot or axe report.
 
-PNG captures contain the WebView content, not OS title bars, file dialogs,
-menus outside the WebView, or external file-drop targets. Engine input is not
-physical Windows input. Desktop recordings capture the entire virtual desktop,
-not a hidden WebView. Use real desktop automation and visual checks for those
-OS interactions. Browser preview cannot prove them either.
+`screenshot` contains WebView content; `native-screenshot` contains the selected
+visible native window. Neither captures arbitrary other applications. Real
+message-box and WebView2 file-picker inspection, native cancellation and
+compositor frames have separate acceptance checks. Unsupported/unrelated OS
+windows still fail explicitly. Engine input is not physical Windows input.
+Desktop recordings capture the entire virtual desktop, not a hidden WebView.
+External file-drop input and Narrator/NVDA speech require further acceptance.
+Browser preview cannot prove those OS behaviors.
 
 ## Repeatable verification
 
@@ -282,6 +336,7 @@ npm ci --ignore-scripts
 node scripts/verify-native-accessibility.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/a11y-visible
 node scripts/verify-native-uia-actions.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/uia-visible
 node scripts/verify-native-uia-collections.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/collections-visible node_modules/axe-core/axe.min.js target/debug/rdesktop.exe
+node scripts/verify-native-dialogs.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/dialogs-visible target/debug/rdesktop.exe
 # Repeat with dev --headless and a different artifact directory.
 cargo fmt --all -- --check
 cargo check --workspace --features rdesktop-webview/native-agent
@@ -318,3 +373,11 @@ checks measure their actual opaque rendered foreground/background colors,
 including all selected/unselected options, against WCAG AA's 4.5:1 threshold;
 native visual review remains part of release acceptance. This is distinct from
 the accessibility fixture's zero-incomplete axe result.
+
+The native-dialog verifier keeps a real Windows modal open beyond 30 seconds,
+checks parent state and responsive reads, invokes its real Cancel button,
+verifies stale/cross-renderer rejection, and repeats with WebView2's actual
+file picker. It decodes captured RGBA pixels, rejects blank frames, checks
+stable DWM coordinates and CLI PNG output, and verifies minimized/hidden
+capture rejection without changing visibility. File-picker screenshots can
+contain local filenames and must remain ignored local artifacts.

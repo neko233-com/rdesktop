@@ -1764,6 +1764,7 @@ dependencies = [
  "rdesktop-core",
  "rdesktop-webview",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2463,6 +2464,8 @@ name = "rdesktop-webview"
 version = "0.1.11"
 dependencies = [
  "anyhow",
+ "base64",
+ "image",
  "percent-encoding",
  "raw-window-handle",
  "rdesktop-core",

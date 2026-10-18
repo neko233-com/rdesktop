@@ -65,6 +65,7 @@ impl Drop for Com {
 
 fn connect(
     hwnd: isize,
+    pid: u32,
     params: &Value,
 ) -> Result<
     (
@@ -99,12 +100,12 @@ fn connect(
     .map_err(|e| e.to_string())?;
     let root =
         unsafe { automation.ElementFromHandle(HWND(hwnd as *mut _)) }.map_err(|e| e.to_string())?;
-    validate_root(&root, hwnd)?;
+    validate_root(&root, hwnd, pid)?;
     Ok((com, automation, walker, root))
 }
 
-fn validate_root(root: &IUIAutomationElement, hwnd: isize) -> Result<(), String> {
-    if unsafe { root.CurrentProcessId() }.map_err(|e| e.to_string())? as u32 != std::process::id()
+fn validate_root(root: &IUIAutomationElement, hwnd: isize, pid: u32) -> Result<(), String> {
+    if unsafe { root.CurrentProcessId() }.map_err(|e| e.to_string())? as u32 != pid
         || unsafe { root.CurrentNativeWindowHandle() }
             .map_err(|e| e.to_string())?
             .0 as isize
@@ -115,8 +116,59 @@ fn validate_root(root: &IUIAutomationElement, hwnd: isize) -> Result<(), String>
     Ok(())
 }
 
-pub fn snapshot(hwnd: isize, params: &Value) -> Result<Value, String> {
-    let (_com, _automation, walker, root) = connect(hwnd, params)?;
+pub(crate) struct NativeChildren {
+    pub windows: Vec<(isize, u32)>,
+    pub truncated: bool,
+}
+/// Read only immediate raw provider children, without names, values or a
+/// desktop-root search. Windows can broker a modal in a separate process.
+pub(crate) fn native_children(
+    hwnd: isize,
+    pid: u32,
+    deadline: Instant,
+) -> Result<NativeChildren, String> {
+    let (_com, _automation, walker, root) = connect(hwnd, pid, &json!({}))?;
+    let mut child = collections::walk(&walker, &root, collections::WalkerStep::FirstChild)
+        .map_err(|error| error.to_string())?;
+    let mut result = NativeChildren {
+        windows: Vec::new(),
+        truncated: false,
+    };
+    let mut visited = 0;
+    while let Some(element) = child {
+        if visited >= 256 || Instant::now() >= deadline {
+            result.truncated = true;
+            break;
+        }
+        visited += 1;
+        unsafe {
+            let native = element
+                .CurrentNativeWindowHandle()
+                .map_err(|error| error.to_string())?
+                .0 as isize;
+            let process = element
+                .CurrentProcessId()
+                .map_err(|error| error.to_string())? as u32;
+            if native != 0 && native != hwnd {
+                let mut actual = 0;
+                windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+                    native as _,
+                    &mut actual,
+                );
+                if process != 0 && process == actual {
+                    result.windows.push((native, process));
+                }
+            }
+        }
+        child = collections::walk(&walker, &element, collections::WalkerStep::NextSibling)
+            .map_err(|error| error.to_string())?;
+    }
+    validate_root(&root, hwnd, pid)?;
+    Ok(result)
+}
+
+pub fn snapshot(hwnd: isize, pid: u32, params: &Value) -> Result<Value, String> {
+    let (_com, _automation, walker, root) = connect(hwnd, pid, params)?;
     let limit = params["max_nodes"].as_u64().unwrap_or(1000).clamp(1, 5000) as usize;
     let depth_limit = params["max_depth"].as_u64().unwrap_or(64).clamp(1, 128) as usize;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -161,6 +213,8 @@ pub fn snapshot(hwnd: isize, params: &Value) -> Result<Value, String> {
                 "localized_control_type":element.CurrentLocalizedControlType().ok().map(|v|v.to_string()),
                 "automation_id":element.CurrentAutomationId().ok().map(|v|v.to_string()),
                 "class_name":element.CurrentClassName().ok().map(|v|v.to_string()),
+                "process_id":element.CurrentProcessId().ok(),
+                "native_window_handle":element.CurrentNativeWindowHandle().ok().map(|value|format!("{:X}",value.0 as usize)),
                 "help_text":element.CurrentHelpText().ok().map(|v|v.to_string()),
                 "access_key":element.CurrentAccessKey().ok().map(|v|v.to_string()),
                 "accelerator_key":element.CurrentAcceleratorKey().ok().map(|v|v.to_string()),
@@ -566,7 +620,15 @@ fn validate_request(params: &Value) -> Result<&str, String> {
         _ => return Err("unsupported UIA operation".into()),
     };
     if object.keys().any(|key| {
-        !["window", "view", "operation", "max_nodes", "max_depth"].contains(&key.as_str())
+        ![
+            "window",
+            "native_window",
+            "view",
+            "operation",
+            "max_nodes",
+            "max_depth",
+        ]
+        .contains(&key.as_str())
             && !extras.contains(&key.as_str())
     }) {
         return Err("unsupported UIA parameter for this operation".into());
@@ -893,13 +955,14 @@ impl Action {
 
 pub fn handle(
     hwnd: isize,
+    pid: u32,
     params: &Value,
     revalidate: impl Fn() -> Result<(), String>,
 ) -> Result<Value, String> {
     let operation = validate_request(params)?;
     revalidate()?;
     if operation == "snapshot" {
-        let result = snapshot(hwnd, params)?;
+        let result = snapshot(hwnd, pid, params)?;
         revalidate()?;
         return Ok(result);
     }
@@ -907,19 +970,19 @@ pub fn handle(
     let action = is_mutating(params)
         .then(|| Action::parse(operation, params))
         .transpose()?;
-    let (_com, automation, walker, root) = connect(hwnd, params)?;
+    let (_com, automation, walker, root) = connect(hwnd, pid, params)?;
     let element = find_target(&root, &walker, &target, params)?;
     // Do not let a stale HWND/closed framework ID resolve to a replacement
     // window during the native provider traversal.
     revalidate()?;
-    validate_root(&root, hwnd)?;
+    validate_root(&root, hwnd, pid)?;
     if operation == "inspect" {
         return Ok(json!({"source":"windows-uia","element":inspect(&element)}));
     }
     if collections::OPERATIONS.contains(&operation) {
         let result = collections::read(hwnd, &automation, &root, &element, operation, params)?;
         revalidate()?;
-        validate_root(&root, hwnd)?;
+        validate_root(&root, hwnd, pid)?;
         return Ok(result);
     }
     if matches!(operation, "text" | "text-selection") {

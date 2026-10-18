@@ -24,15 +24,17 @@ pub(crate) struct NativeAgent {
 struct Backend {
     runtime: NativeRuntime,
     ids: Mutex<HashSet<u64>>,
+    native_windows: crate::native_windows::NativeWindows,
     events: Mutex<VecDeque<Value>>,
     event_notify: Condvar,
     event_sequence: AtomicU64,
-    input_busy: Mutex<HashSet<u64>>,
+    input_busy: Mutex<HashSet<String>>,
+    capture_busy: Mutex<()>,
 }
 
 struct InputPermit<'a> {
-    busy: &'a Mutex<HashSet<u64>>,
-    window: u64,
+    busy: &'a Mutex<HashSet<String>>,
+    window: String,
 }
 impl Drop for InputPermit<'_> {
     fn drop(&mut self) {
@@ -52,10 +54,12 @@ impl NativeAgent {
         let backend = Arc::new(Backend {
             runtime,
             ids: Mutex::new(HashSet::new()),
+            native_windows: crate::native_windows::NativeWindows::default(),
             events: Mutex::new(VecDeque::new()),
             event_notify: Condvar::new(),
             event_sequence: AtomicU64::new(0),
             input_busy: Mutex::new(HashSet::new()),
+            capture_busy: Mutex::new(()),
         });
         let server = NativeAgentServer::start(backend.clone(), discovery)
             .map_err(|e| rdesktop_core::RdesktopError::Config(e.to_string()))?;
@@ -66,7 +70,24 @@ impl NativeAgent {
         })
     }
 
-    pub fn attach(&self, id: u64, webview: &wry::WebView) {
+    pub fn attach(&self, id: u64, window: &tao::window::Window, webview: &wry::WebView) {
+        use tao::platform::windows::WindowExtWindows;
+        let mut browser_pid = 0;
+        let browser_pid = unsafe { webview.webview().BrowserProcessId(&mut browser_pid) }
+            .ok()
+            .map(|_| browser_pid);
+        if let Err(error) =
+            self.backend
+                .native_windows
+                .attach(id, window.hwnd(), webview.url().ok(), browser_pid)
+        {
+            self.backend.event(
+                id,
+                "rdesktop.agent.error",
+                &json!({"error":error}).to_string(),
+            );
+            return;
+        }
         self.backend.ids.lock().unwrap().insert(id);
         // CDP events come from the actual engine, including uncaught errors and
         // failed network loads. Retain at most 512 events and 16 KiB per event.
@@ -78,6 +99,7 @@ impl NativeAgent {
             "Accessibility.loadComplete",
             "Accessibility.nodesUpdated",
             "Input.dragIntercepted",
+            "Page.frameNavigated",
         ] {
             let backend = self.backend.clone();
             let result = (|| -> windows::core::Result<()> {
@@ -114,6 +136,7 @@ impl NativeAgent {
             "Log.enable",
             "Network.enable",
             "Accessibility.enable",
+            "Page.enable",
         ] {
             let callback =
                 CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
@@ -129,6 +152,7 @@ impl NativeAgent {
 
     pub fn detach(&self, id: u64) {
         self.backend.ids.lock().unwrap().remove(&id);
+        self.backend.native_windows.detach(id);
     }
     pub fn finish(&mut self) {
         self.server.finish();
@@ -142,6 +166,14 @@ impl Backend {
         } else {
             json!({"truncated":true,"bytes":payload.len()})
         };
+        if method == "Page.frameNavigated"
+            && params["frame"]["parentId"]
+                .as_str()
+                .is_none_or(str::is_empty)
+        {
+            self.native_windows
+                .navigated(id, params["frame"]["url"].as_str());
+        }
         let mut events = self.events.lock().unwrap();
         if events.len() >= 512 {
             events.pop_front();
@@ -543,33 +575,21 @@ impl NativeAgentBackend for Backend {
         json!({"uia":{"source":"windows-uia","operations":crate::native_accessibility::OPERATIONS,
             "scope":"selected registered native window and its descendants", "target_fields":["runtime_id","name","automation_id","control_type","class_name"],
             "collections":{"default_max_items":32,"maximum_max_items":256,"selection_strategies":["provider","items"],"default_scan_max_nodes":1000,"maximum_scan_max_nodes":5000,"default_scan_max_depth":64,"maximum_scan_max_depth":128},
-            "pattern_support":"provider-dependent; unsupported patterns fail without a DOM fallback"}})
+            "pattern_support":"provider-dependent; unsupported patterns fail without a DOM fallback"},
+            "native_windows":{"command":"native-windows","uia_parameter":"native_window","scope":"native owner chain under the selected renderer; OS broker windows also require a fresh immediate raw UIA child relation","maximum_windows":64,"modal_inspection":true},
+            "native_screenshot":{"source":"windows-graphics-capture","includes_os_frame":true,"requires_visible":true,"maximum_pixels":16777216,"minimum_windows_build":18362}})
     }
     fn request(&self, command: &str, params: Value) -> Result<Value, String> {
+        if params.get("native_window").is_some() && !matches!(command, "uia" | "native-screenshot")
+        {
+            return Err("native_window requires UIA or native-screenshot".into());
+        }
         if command == "exit" {
             self.runtime.exit().map_err(|e| e.to_string())?;
             return Ok(json!({"accepted":true}));
         }
         if command == "windows" {
-            let ids: Vec<_> = self.ids.lock().unwrap().iter().copied().collect();
-            let mut windows = Vec::new();
-            for id in ids {
-                if let Ok(info) = self.runtime.with_window(id,move |window,webview| {
-                    let size=window.inner_size();let outer=window.outer_size();let pos=window.outer_position().ok();
-                    json!({"id":id.to_string(),"title":window.title(),"url":webview.url().ok(),"visible":window.is_visible(),
-                        "focused":window.is_focused(),"minimized":window.is_minimized(),"maximized":window.is_maximized(),
-                        "scale_factor":window.scale_factor(),"client":{"width":size.width,"height":size.height},
-                        "outer":{"width":outer.width,"height":outer.height,"x":pos.map(|p|p.x),"y":pos.map(|p|p.y)}})
-                }) { windows.push(info); }
-            }
-            windows.sort_by_key(|v| {
-                v["id"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .parse::<u64>()
-                    .unwrap_or_default()
-            });
-            return Ok(json!({"windows":windows}));
+            return self.native_windows.windows();
         }
         if command == "events" {
             let after = params["window"]
@@ -588,17 +608,29 @@ impl NativeAgentBackend for Backend {
         }
         let id = self.window(&params)?;
         match command {
+            "native-windows" => self.native_windows.enumerate(id,&params),
+            "native-screenshot" => {
+                use base64::Engine;
+                if params.as_object().is_none_or(|object|object.keys().any(|key|!["window","native_window"].contains(&key.as_str()))){return Err("unknown native-screenshot parameter".into());}
+                let _capture=self.capture_busy.try_lock().map_err(|_|"another native compositor capture is active")?;
+                let native=params.get("native_window").map(|value|value.as_str().filter(|value|value.len()<=64).ok_or("native_window must be a current opaque discovery ID")).transpose()?;
+                let target=self.native_windows.target(id,native)?;
+                let capture=crate::native_capture::capture(target,||{if self.native_windows.target(id,native)?!=target {Err("native capture window was replaced".into())}else{Ok(())}})?;
+                Ok(json!({"data":base64::engine::general_purpose::STANDARD.encode(capture.png),"source":"windows-graphics-capture","width":capture.width,"height":capture.height,"frame":capture.frame}))
+            },
             "uia" => {
-                use tao::platform::windows::WindowExtWindows;
-                let hwnd=self.runtime.with_window(id,|window,_|window.hwnd()).map_err(|e|e.to_string())?;
+                let native=params.get("native_window").map(|value|value.as_str().filter(|value|value.len()<=64).ok_or("native_window must be a current opaque discovery ID")).transpose()?;
+                let target=self.native_windows.target(id,native)?;
+                let hwnd=target.hwnd;
+                let input_key=match native {Some(native)=>format!("native:{id}:{native}"),None=>format!("renderer:{id}")};
                 let _permit = if crate::native_accessibility::is_mutating(&params) {
                     let mut busy=self.input_busy.lock().map_err(|_|"input queue poisoned")?;
-                    if !busy.insert(id){return Err("another input action is active for this window".into());}
-                    Some(InputPermit{busy:&self.input_busy,window:id})
+                    if !busy.insert(input_key.clone()){return Err("another input action is active for this window".into());}
+                    Some(InputPermit{busy:&self.input_busy,window:input_key})
                 } else { None };
-                crate::native_accessibility::handle(hwnd,&params,||{
-                    let current=self.runtime.with_window(id,|window,_|window.hwnd()).map_err(|e|e.to_string())?;
-                    if current!=hwnd {Err("native accessibility window was replaced".into())} else {Ok(())}
+                crate::native_accessibility::handle(hwnd,target.pid,&params,||{
+                    let current=self.native_windows.target(id,native)?;
+                    if current!=target {Err("native accessibility window was replaced".into())} else {Ok(())}
                 })
             }
             "accessibility" => self.accessibility(id,&params),
@@ -616,9 +648,9 @@ impl NativeAgentBackend for Backend {
             "elements" => self.evaluate(id,&format!(r#"Array.from(document.querySelectorAll({})).slice(0,500).map(el=>{{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return {{tag:el.tagName,id:el.id,text:(el.textContent||'').slice(0,2048),role:el.getAttribute('role'),label:el.getAttribute('aria-label'),value:el.value,visible:!!(r.width&&r.height&&s.visibility!=='hidden'&&s.display!=='none'),enabled:!el.disabled,bounds:{{x:r.x,y:r.y,width:r.width,height:r.height}},style:{{font:s.font,color:s.color,background:s.backgroundColor,display:s.display}}}};}})"#,json!(params["selector"].as_str().unwrap_or("button,input,[role]")))),
             "action" => {
                 let mut busy=self.input_busy.lock().map_err(|_|"input queue poisoned")?;
-                if !busy.insert(id){return Err("another input action is active for this window".into());}
+                if !busy.insert(format!("renderer:{id}")){return Err("another input action is active for this window".into());}
                 drop(busy);
-                let _permit=InputPermit{busy:&self.input_busy,window:id};
+                let _permit=InputPermit{busy:&self.input_busy,window:format!("renderer:{id}")};
                 self.action(id,&params)
             },
             "screenshot" => self.cdp(id,"Page.captureScreenshot",json!({"format":"png","captureBeyondViewport":false})),

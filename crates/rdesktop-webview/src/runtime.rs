@@ -150,6 +150,24 @@ impl NativeRuntime {
         self.enqueue(Request::Dispatch(Box::new(operation)))
     }
 
+    /// Queue window-scoped UI work and return on acceptance. The current window
+    /// and WebView are resolved when the task executes; a closed window skips
+    /// the task. Suitable for modal dialogs without a synchronous reply timeout.
+    pub fn dispatch_window(
+        &self,
+        id: u64,
+        operation: impl FnOnce(&Window, &WebView) + Send + 'static,
+    ) -> Result<()> {
+        self.enqueue(Request::Execute {
+            id,
+            task: Box::new(move |entry| {
+                if let Some((window, view)) = entry {
+                    operation(window, view);
+                }
+            }),
+        })
+    }
+
     pub fn close_window(&self, id: u64) -> Result<()> {
         self.enqueue(Request::Close(id))
     }

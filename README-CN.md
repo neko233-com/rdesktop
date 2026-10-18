@@ -65,6 +65,8 @@ Chromium 路径要求主机上存在兼容的 Chrome、Chromium 或 Edge 可执�
 
 无障碍接口提供完整引擎 AX 查询、同窗口 Windows UIA 快照、角色与名称定位、键盘操作和本地 axe 审计。隐藏窗口的引擎 AX 与 Windows UIA 分别报告；具体范围和人工读屏验收要求见[原生 Agent 文档](docs/NATIVE_AGENT.md)。
 
+原生调试还支持真实 UIA pattern 操作、所属 Windows 消息框和系统代理进程中的文件选择器。`native-windows` 返回经过归属与生命周期校验的窗口 ID，`native-screenshot` 输出包含系统标题栏的合成器 PNG，并在尺寸匹配时提供屏幕坐标。隐藏窗口继续使用 WebView 内容截图；不会为检查而自动显示窗口。
+
 开发服务器支持：
 
 - DOM 快照和 CSS 选择器元素查询；

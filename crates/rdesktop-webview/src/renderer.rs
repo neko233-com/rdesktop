@@ -1284,7 +1284,7 @@ impl Renderer for WebViewRenderer {
                         };
 
                         #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
-                        if let Some(agent) = &native_agent { agent.attach(*rdesktop_id, &webview); }
+                        if let Some(agent) = &native_agent { agent.attach(*rdesktop_id, &window, &webview); }
                         // An inherited Windows STARTUPINFO SW_HIDE can consume
                         // the builder's first show request. Explicit visible
                         // windows must still appear after WebView setup.

@@ -76,7 +76,8 @@ enum Commands {
         #[arg(long)]
         session: PathBuf,
         /// info, windows, dom, elements, state, evaluate, action, cdp, events,
-        /// accessibility, uia, audit, screenshot, window, reload, ipc, exit or recording[/start|/stop|/file]
+        /// accessibility, uia, audit, screenshot, native-windows, native-screenshot,
+        /// window, reload, ipc, exit or recording[/start|/stop|/file]
         command: String,
         #[arg(long)]
         window: Option<u64>,
@@ -555,6 +556,8 @@ async fn agent_response(
             command,
             "info"
                 | "windows"
+                | "native-windows"
+                | "native-screenshot"
                 | "dom"
                 | "elements"
                 | "state"
@@ -616,7 +619,10 @@ async fn agent_request(
     output: Option<&Path>,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        !matches!(command, "screenshot" | "recording/file") || output.is_some(),
+        !matches!(
+            command,
+            "screenshot" | "native-screenshot" | "recording/file"
+        ) || output.is_some(),
         "--output is required for PNG/MP4"
     );
     let mut response = agent_response(session_path, command, params).await?;

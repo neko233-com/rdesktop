@@ -25,6 +25,8 @@ rdesktop agent --session .rdesktop/agent-cli-PID.json windows
 rdesktop agent --session .rdesktop/agent-cli-PID.json accessibility
 rdesktop agent --session .rdesktop/agent-cli-PID.json uia
 rdesktop agent --session .rdesktop/agent-cli-PID.json screenshot --output main.png
+rdesktop agent --session .rdesktop/agent-cli-PID.json native-windows --window 1
+rdesktop agent --session .rdesktop/agent-cli-PID.json native-screenshot --window 1 --output native-frame.png
 ```
 
 Read the [native Agent contract](https://github.com/neko233-com/rdesktop/blob/main/docs/NATIVE_AGENT.md)
