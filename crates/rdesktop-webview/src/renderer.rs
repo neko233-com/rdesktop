@@ -1294,6 +1294,7 @@ impl Renderer for WebViewRenderer {
                         let entry = rdesktop_to_tao.get(&id).and_then(|id| windows.get(id));
                         task(entry.map(|entry| (&entry.window, &entry.webview)));
                     }
+                    crate::runtime::Request::Dispatch(task) => task(),
                     crate::runtime::Request::Close(id) => {
                         if let Some(tao_id) = rdesktop_to_tao.remove(&id) {
                             tao_to_rdesktop.remove(&tao_id);

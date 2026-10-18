@@ -42,6 +42,7 @@ pub(crate) enum Request {
         id: u64,
         task: WindowTask,
     },
+    Dispatch(Box<dyn FnOnce() + Send>),
     Close(u64),
     Exit,
 }
@@ -64,8 +65,8 @@ struct Shared {
 }
 
 /// A bounded command queue. Synchronous calls must be made from application
-/// workers, never from the native event loop. Shutdown and missing-window errors
-/// are returned to the caller rather than silently dropping operations.
+/// workers, never from the native event loop. Synchronous calls report shutdown
+/// and missing-window errors. Dispatched tasks report acceptance only.
 #[derive(Clone, Default)]
 pub struct NativeRuntime {
     shared: Arc<Shared>,
@@ -136,6 +137,17 @@ impl NativeRuntime {
         result
             .map_err(|e| RdesktopError::Config(format!("native operation failed: {e}")))?
             .ok_or_else(|| RdesktopError::Config("native window no longer exists".into()))
+    }
+
+    /// Queue work on the native event-loop thread and return on acceptance.
+    ///
+    /// Use this for modal operations whose duration is controlled by the user.
+    /// Unlike `with_window`, execution has no 30-second reply deadline. It is
+    /// safe to enqueue from the UI thread, but do not wait there for completion.
+    /// Callers that need a result must carry their own completion channel; tasks
+    /// still queued at renderer shutdown are dropped without execution.
+    pub fn dispatch(&self, operation: impl FnOnce() + Send + 'static) -> Result<()> {
+        self.enqueue(Request::Dispatch(Box::new(operation)))
     }
 
     pub fn close_window(&self, id: u64) -> Result<()> {
@@ -209,5 +221,60 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("no longer exists"));
+    }
+
+    #[test]
+    fn dispatch_returns_on_acceptance_and_runs_independently_of_completion() {
+        let runtime = NativeRuntime::default();
+        runtime.set_wake(Arc::new(|| {}));
+        let (started, start) = mpsc::sync_channel(1);
+        let (finish, finished) = mpsc::sync_channel(1);
+        let (done, completion) = mpsc::sync_channel(1);
+        // Unlike synchronous queries, scheduling from the native UI thread is
+        // allowed. Returning here must not wait for the modal operation.
+        runtime
+            .dispatch(move || {
+                started.send(()).unwrap();
+                finished.recv().unwrap();
+                done.send(()).unwrap();
+            })
+            .unwrap();
+        assert!(start.try_recv().is_err());
+        let Request::Dispatch(task) = runtime.drain().pop().unwrap() else {
+            panic!("Expected dispatch");
+        };
+        let executor = std::thread::spawn(task);
+        start.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(completion.try_recv().is_err());
+        finish.send(()).unwrap();
+        completion.recv_timeout(Duration::from_secs(2)).unwrap();
+        executor.join().unwrap();
+    }
+
+    #[test]
+    fn dispatch_remains_bounded_and_shutdown_drops_queued_tasks() {
+        let runtime = NativeRuntime::default();
+        let executed = Arc::new(AtomicU64::new(0));
+        for _ in 0..MAX_REQUESTS {
+            let executed = executed.clone();
+            runtime
+                .dispatch(move || {
+                    executed.fetch_add(1, Ordering::Relaxed);
+                })
+                .unwrap();
+        }
+        assert!(runtime
+            .dispatch(|| {})
+            .unwrap_err()
+            .to_string()
+            .contains("full"));
+        runtime.shutdown();
+        assert!(runtime.drain().is_empty());
+        assert_eq!(executed.load(Ordering::Relaxed), 0);
+        assert!(runtime
+            .dispatch(|| {})
+            .unwrap_err()
+            .to_string()
+            .contains("stopped"));
     }
 }

@@ -1,5 +1,46 @@
 # Windows integration validation
 
+## Modal UI dispatch regression (2026-10-18)
+
+`NativeRuntime::with_window` is a synchronous query with a 30-second reply
+deadline. A consumer must not use it as a scheduler for an operation that opens
+a native modal picker: after 30 seconds the caller receives an error even while
+the user is still selecting a file. Raising the HTTP timeout alone does not fix
+that native scheduling failure.
+
+`NativeRuntime::dispatch` queues a UI-thread closure and reports acceptance.
+It uses the same 256-request bound and rejects work after shutdown; shutdown
+drops unexecuted closures. It has no operation-completion deadline. Callers
+that need results provide their own completion channel and must not wait on
+that channel from the UI thread. Existing synchronous query deadlines remain.
+
+Queue tests exercise immediate acceptance from the registered UI thread,
+independent completion, saturation and shutdown without opening user windows.
+For a native consumer check, use the local iHub Cargo command-line patch
+overrides for rdesktop-core and rdesktop-webview; do not commit local dependency
+paths. Launch its debug executable, open the SD image parameter fixture, keep
+the Windows picker open for more than 30 seconds, then select only a test-owned
+PNG. The plugin must display its parameters and the original copy button must
+write the exact owned text. Preserve the pre-test clipboard formats in memory
+and restore them after observing that text. Normal application exit must still
+work. This check is separate from the synthetic HTTP dialog-delay test.
+
+The browser request sequence is unchanged: open the consumer preview at
+`http://127.0.0.1:1420/`, open plugin center, open settings, then return to the
+launcher and inspect warning/error logs. Dispatch is a native Rust host API;
+browser preview does not stand in for the modal Windows check.
+
+The local Windows check passed against the patched framework: after a measured
+64 seconds in the real picker, iHub displayed the owned PNG and its parameters.
+The public plugin's original copy button produced the exact text; the test
+restored prior clipboard formats in memory. The tested local-patch consumer EXE
+SHA-256 was `0044ce0dd615ff7225624269863a78c8cd889942ee78046e42d4ebb4da879ad0`.
+Framework fmt/check/clippy and 40 tests passed (the installer compiler opt-in
+remained ignored). The browser plugin-center/settings/launcher sequence also
+passed with no warning/error logs. Version numbers remain unchanged.
+The consumer then exited through its visible settings control; no iHub process
+remained. No process was forcibly terminated or installed executable replaced.
+
 Validated locally on Windows x64 on 2026-10-17. No macOS or ARM64 runtime
 validation is implied. The source version remains 0.1.8 during this work.
 
