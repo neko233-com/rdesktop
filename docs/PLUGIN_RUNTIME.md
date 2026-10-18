@@ -170,7 +170,9 @@ native Buffer/hash results, Promise and callback metadata, callback output,
 real file output and invalid-image errors. The visible run used real UIA Invoke
 and a Windows compositor capture. Both runs kept page Node globals absent,
 verified lazy loading and stable module identity, preserved the original module
-file hashes and normally retired the owned Node worker without Electron.
+file hashes and retired the owned Node worker without Electron; the host exited
+with code zero. Process-tree observation verifies retirement, not a separately
+observed worker exit code or whether its termination fallback was used.
 This accepts that specific native addon distribution, not arbitrary Node ABIs.
 
 ```powershell

@@ -99,5 +99,5 @@ try {
   const remaining = snapshot();
   assert(!remaining.some(process => ownedProcesses.some(owned => owned.Name.toLowerCase() === 'node.exe' && owned.ProcessId === process.ProcessId && owned.ParentProcessId === process.ParentProcessId)), 'Owned Node worker did not retire normally');
 }
-await fs.writeFile(path.join(run, 'proof.json'), JSON.stringify({ ...proof, normalOwnedNodeExit: true }, null, 2));
+await fs.writeFile(path.join(run, 'proof.json'), JSON.stringify({ ...proof, hostExitCode: 0, ownedNodeRetired: true }, null, 2));
 console.log(JSON.stringify({ mode, hidden, checks: proof.checks, output: run }));
