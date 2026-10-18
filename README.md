@@ -159,13 +159,13 @@ native mouse handling or client-area dimensions.
 ### Install the CLI
 
 ```bash
-npm install -g https://github.com/neko233-com/rdesktop/releases/download/v0.1.9/rdesktop-0.1.9.tgz
+npm install -g https://github.com/neko233-com/rdesktop/releases/download/v0.1.10/rdesktop-0.1.10.tgz
 # Or install the CLI from this immutable source release:
-cargo install --git https://github.com/neko233-com/rdesktop.git --tag v0.1.9 rdesktop-cli
+cargo install --git https://github.com/neko233-com/rdesktop.git --tag v0.1.10 rdesktop-cli
 ```
 
 The GitHub npm tarball contains the Windows x64 CLI. The npm registry publication
-is a separate step; use `npm install -g rdesktop@0.1.9` when that version is
+is a separate step; use `npm install -g rdesktop@0.1.10` when that version is
 available there. Building native applications also requires Rust MSVC, the
 Windows SDK and WebView2 Runtime.
 

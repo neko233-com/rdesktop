@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.10
+
+The native Agent now drives Windows UI Automation through real COM patterns:
+Value, RangeValue, Toggle, ExpandCollapse, SelectionItem, Invoke, Scroll,
+Text selection, Window and Transform, with explicit provider-dependent
+VirtualizedItem, LegacyIAccessible and MultipleView requests. `agent info`
+advertises the backend's operations and target criteria.
+
+Targets are resolved again inside the selected registered native window using
+exact criteria or opaque provider runtime IDs. Ambiguous, removed, disabled,
+read-only, unsupported and truncated name searches fail explicitly. Runtime
+IDs are temporary, not persistent identities. Mutations share per-window input
+exclusion; password inspection/text is redacted and value writes never echo
+their input. GET requests cannot perform UIA mutations.
+
+A separate native fixture verifies 17 groups of actual UIA effects, including
+Unicode targets, text selection, native movement/resizing, window state and
+normal close. Visible/hidden engine and accessibility regression checks,
+installer compilation, generated-project compilation and production interface
+isolation also pass. Hidden Windows provider trees remain provider-dependent;
+separate OS dialogs and Narrator/NVDA speech are not claimed as validated.
+The WebView2 Scroll provider can report zero percent after a successful native
+scroll; inspection preserves that OS result and verification records the real
+viewport change separately. See [the full contract](docs/NATIVE_AGENT.md).
+
 ## 0.1.9
 
 Windows development now starts the actual Rust desktop application by default.

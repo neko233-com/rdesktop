@@ -6,11 +6,11 @@
 //! ## Agent-First Development
 //!
 //! rdesktop supports a special `dev` mode designed for AI agent workflows:
-//! - `rdesktop dev` starts a local HTTP server serving the frontend
-//! - The app runs in the user's browser (localhost:PORT)
-//! - AI agents can use Playwright/Puppeteer MCP tools to inspect and interact
-//! - No native window needed during development
-//! - Same code works in both dev (browser) and prod (native window) modes
+//! - `rdesktop dev` starts the real Rust desktop app with a local frontend server
+//! - `--headless` hides the same native engine; `--browser` selects browser preview
+//! - Opt-in debug builds expose authenticated, bounded native Agent inspection
+//! - Release applications compile out the native development Agent
+//! - Browser preview and native rendering share the application's frontend
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
