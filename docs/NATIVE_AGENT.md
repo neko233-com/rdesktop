@@ -196,6 +196,10 @@ rdesktop agent --session .rdesktop/agent-cli-PID.json uia --params-file uia-acti
 | `window-close` | Normal Window pattern close, including normal application prompts |
 | `move`, `resize`, `rotate` | Transform pattern; finite `x`/`y`, positive `width`/`height`, or `degrees`; coordinates follow the native UIA provider |
 | `text-select` | Text pattern `start`/`end`, 0..1000000 UIA character units; end must not precede start |
+| `grid-item` | Grid pattern, zero-based integer `row` and `column` (0..1000000), checked against the current native dimensions |
+| `table-headers`, `table-item-headers` | Table/TableItem row and column header element collections; `max_items` 1..256 per array, default 32 |
+| `selection` | Selection pattern's actual selected-element collection; `max_items` 1..256, default 32; explicit `strategy` described below |
+| `containing-grid`, `selection-container` | GridItem/SelectionItem native owner element |
 
 These call the real Windows COM interfaces. Unsupported/read-only/disabled
 operations fail explicitly; the framework does not synthesize DOM events or
@@ -219,6 +223,34 @@ their input. Native mutation failures report their HRESULT without copying a
 provider error message that could contain the supplied value. UIA targets do
 not include separate OS dialogs/popups outside the selected registered window;
 those still require separate desktop/ownership verification.
+
+Collection descriptors contain current provider runtime IDs and control
+metadata, without text/value reads. Every returned element must prove raw UIA
+ancestry inside the selected registered window. A different native window that
+is not its Win32 child is rejected. Collections report `total`, returned
+`elements`, `max_items` and `truncated`. Merged cells can return the same opaque
+element for multiple grid coordinates; inspection includes row/column spans.
+Inspection also reports Grid, GridItem, Table, Dock, MultipleView, Selection2,
+Transform2 and LegacyIAccessible scalar states when supplied by the provider.
+Legacy values obey the same password redaction as Value pattern values.
+
+`selection` defaults to `strategy:"provider"`, directly reading
+`GetCurrentSelection`. The WebView2 fixture reports an empty grid collection
+while the cell's native `CurrentIsSelected` is true. A caller can explicitly
+choose `strategy:"items"` to traverse native SelectionItem providers, checking
+both that flag and their current selection-container identity. This strategy
+does not silently replace the provider collection. Its `scan_max_nodes`
+(1..5000, default 1000), `scan_max_depth` (1..128, default 64) and five-second
+budget bound the scan independently of the initial target search. Results
+include `matched`, `visited` and `search_truncated`; an incomplete scan has
+`total:null`. `truncated` also covers the returned item cap. These scans never
+use DOM/AX properties to synthesize native selection.
+
+Native table-wide and per-cell headers can differ: this fixture's table-wide
+row-header array is empty, while its quantity cell reports `Apples` as its row
+header. Both original provider results are retained. Tree walkers preserve
+successful null COM results at tree edges, and propagate real provider errors
+instead of treating failed branches as empty.
 
 ## What this proves
 
@@ -249,6 +281,7 @@ node scripts/verify-native-agent.mjs examples/native_agent/.rdesktop/agent-cli-P
 npm ci --ignore-scripts
 node scripts/verify-native-accessibility.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/a11y-visible
 node scripts/verify-native-uia-actions.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/uia-visible
+node scripts/verify-native-uia-collections.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/collections-visible node_modules/axe-core/axe.min.js target/debug/rdesktop.exe
 # Repeat with dev --headless and a different artifact directory.
 cargo fmt --all -- --check
 cargo check --workspace --features rdesktop-webview/native-agent
@@ -275,3 +308,13 @@ Scroll, Transform and Window effects. It includes disabled/read-only controls,
 ambiguous and removed targets, password redaction, search limits, cross-window
 rejection and normal auxiliary-window close. Its hidden run records actual
 provider availability and verifies that a request does not show the window.
+
+The separate collections fixture verifies native grid coordinates, merged
+cells, header/owner relations, selected-item collections and explicit item
+scans, incomplete totals, password redaction, bounds, and cross-window/closed
+window rejection. Its axe run keeps all rules enabled and preserves incomplete
+contrast results for the rowspan and two native select controls. Separate
+checks measure their actual opaque rendered foreground/background colors,
+including all selected/unselected options, against WCAG AA's 4.5:1 threshold;
+native visual review remains part of release acceptance. This is distinct from
+the accessibility fixture's zero-incomplete axe result.

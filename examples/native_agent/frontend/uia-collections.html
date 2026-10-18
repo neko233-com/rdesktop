@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Native UIA collections fixture</title>
+<style>body{font:16px system-ui;color:#182138;background:#f3f5f8;margin:0;padding:24px}main{max-width:760px;margin:auto}section{background:white;border:1px solid #aab6c6;border-radius:8px;padding:16px;margin:16px 0}table{border-collapse:separate;border-spacing:0;width:100%}caption{font-size:20px;text-align:left;font-weight:600;margin-bottom:12px}td,th{padding:10px;border:1px solid #8995a9;text-align:left;background:white}th{background:#e6edf7}select,input,button{font:inherit;padding:8px}select,input{background:#fff;color:#182138;border:1px solid #8995a9}select option:checked{background:#194c9e;color:white}label{display:block;margin:8px 0}:focus-visible{outline:3px solid #19263d;outline-offset:3px}button{color:white;background:#194c9e;border:1px solid #123b80;border-radius:4px}#grid{display:grid;gap:4px}#grid [role=row]{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}#grid [role=gridcell],#grid [role=columnheader]{padding:8px;border:1px solid #8995a9}</style>
+</head><body><main><h1>Native UIA collections</h1>
+<section aria-label="Table pattern fixture">
+<table id="inventory"><caption>Inventory table</caption>
+<thead><tr><th scope="col">Item</th><th scope="col">Quantity</th><th scope="col">State</th></tr></thead>
+<tbody><tr><th scope="row">Apples</th><td>12</td><td><button id="apple-action">Inspect apples</button></td></tr>
+<tr><th scope="row">Pears</th><td>8</td><td>Available</td></tr></tbody></table>
+<p role="status" id="table-status">No item inspected</p>
+<table id="merged"><caption>Merged cells table</caption><tbody>
+<tr><th rowspan="2" scope="row">Shared row</th><td colspan="2">Wide cell</td></tr><tr><td>Left cell</td><td>Right cell</td></tr>
+</tbody></table>
+</section>
+<section aria-label="Grid pattern fixture"><div role="grid" id="grid" aria-label="Project grid" aria-rowcount="3" aria-colcount="3" aria-multiselectable="false">
+<div role="row"><div role="columnheader">Project</div><div role="columnheader">Owner</div><div role="columnheader">Progress</div></div>
+<div role="row"><div role="gridcell" aria-selected="true" tabindex="0">Alpha</div><div role="gridcell" aria-selected="false" tabindex="-1">Local team</div><div role="gridcell" aria-selected="false" tabindex="-1">Ready</div></div>
+<div role="row"><div role="gridcell" aria-selected="false" tabindex="-1">Beta</div><div role="gridcell" aria-selected="false" tabindex="-1">Local team</div><div role="gridcell" aria-selected="false" tabindex="-1">Draft</div></div>
+</div></section>
+<section aria-label="Selection pattern fixture"><label for="choices">Selected fruits</label>
+<select id="choices" multiple size="4"><option selected>Apple</option><option selected>Banana</option><option selected>Cherry</option><option>Pear</option></select>
+<label for="empty">Empty selection</label><select id="empty" multiple size="2"><option>Unselected one</option><option>Unselected two</option></select>
+<label for="secret">Collection password</label><input id="secret" type="password" value="owned-collection-secret">
+</section></main>
+<script>
+window.fixture={inspections:0};document.querySelector('#apple-action').onclick=()=>{fixture.inspections++;document.querySelector('#table-status').textContent='Apples inspected locally';};
+const cells=Array.from(document.querySelectorAll('#grid [role=gridcell]'));
+document.querySelector('#grid').addEventListener('focusin',event=>{if(!cells.includes(event.target))return;for(const cell of cells){cell.tabIndex=cell===event.target?0:-1;cell.setAttribute('aria-selected',String(cell===event.target));}});
+document.querySelector('#grid').addEventListener('keydown',event=>{const index=cells.indexOf(event.target),step={ArrowLeft:-1,ArrowRight:1,ArrowUp:-3,ArrowDown:3}[event.key];if(index<0||!step)return;event.preventDefault();cells[Math.max(0,Math.min(cells.length-1,index+step))].focus();});
+</script>
+</body></html>

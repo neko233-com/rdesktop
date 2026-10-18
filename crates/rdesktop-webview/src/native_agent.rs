@@ -542,6 +542,7 @@ impl NativeAgentBackend for Backend {
     fn capabilities(&self) -> Value {
         json!({"uia":{"source":"windows-uia","operations":crate::native_accessibility::OPERATIONS,
             "scope":"selected registered native window and its descendants", "target_fields":["runtime_id","name","automation_id","control_type","class_name"],
+            "collections":{"default_max_items":32,"maximum_max_items":256,"selection_strategies":["provider","items"],"default_scan_max_nodes":1000,"maximum_scan_max_nodes":5000,"default_scan_max_depth":64,"maximum_scan_max_depth":128},
             "pattern_support":"provider-dependent; unsupported patterns fail without a DOM fallback"}})
     }
     fn request(&self, command: &str, params: Value) -> Result<Value, String> {

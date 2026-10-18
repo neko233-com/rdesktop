@@ -17,6 +17,8 @@ use windows::Win32::System::Ole::{
 use windows::Win32::System::Variant::VT_I4;
 use windows::Win32::UI::Accessibility::*;
 
+mod collections;
+
 pub const OPERATIONS: &[&str] = &[
     "snapshot",
     "inspect",
@@ -44,6 +46,12 @@ pub const OPERATIONS: &[&str] = &[
     "resize",
     "rotate",
     "text-select",
+    "grid-item",
+    "table-headers",
+    "table-item-headers",
+    "selection",
+    "containing-grid",
+    "selection-container",
 ];
 
 struct Com;
@@ -168,17 +176,19 @@ pub fn snapshot(hwnd: isize, params: &Value) -> Result<Value, String> {
         };
         truncated |= node["patterns_truncated"] == true;
         nodes.push(node);
+        let mut child = collections::walk(&walker, &element, collections::WalkerStep::FirstChild)
+            .map_err(|error| error.to_string())?;
         if depth >= depth_limit {
-            truncated = true;
+            truncated |= child.is_some();
             continue;
         }
-        let mut child = unsafe { walker.GetFirstChildElement(&element) }.ok();
         while let Some(element) = child {
             if nodes.len() + queue.len() >= limit || Instant::now() >= deadline {
                 truncated = true;
                 break;
             }
-            child = unsafe { walker.GetNextSiblingElement(&element) }.ok();
+            child = collections::walk(&walker, &element, collections::WalkerStep::NextSibling)
+                .map_err(|error| error.to_string())?;
             queue.push_back((element, Some(id), depth + 1));
         }
     }
@@ -320,7 +330,8 @@ fn find_target(
             }
             matched = Some(element.clone());
         }
-        let mut child = unsafe { walker.GetFirstChildElement(&element) }.ok();
+        let mut child = collections::walk(walker, &element, collections::WalkerStep::FirstChild)
+            .map_err(|error| error.to_string())?;
         if depth >= depth_limit {
             truncated |= child.is_some();
             continue;
@@ -330,7 +341,8 @@ fn find_target(
                 truncated = true;
                 break;
             }
-            child = unsafe { walker.GetNextSiblingElement(&element) }.ok();
+            child = collections::walk(walker, &element, collections::WalkerStep::NextSibling)
+                .map_err(|error| error.to_string())?;
             queue.push_back((element, depth + 1));
         }
     }
@@ -413,6 +425,57 @@ fn inspect(element: &IUIAutomationElement) -> Value {
         {
             states.insert("window".into(), json!({"visual_state":pattern.CurrentWindowVisualState().ok().map(|value|value.0),"modal":pattern.CurrentIsModal().ok().map(|value|value.as_bool()),"topmost":pattern.CurrentIsTopmost().ok().map(|value|value.as_bool()),"can_maximize":pattern.CurrentCanMaximize().ok().map(|value|value.as_bool()),"can_minimize":pattern.CurrentCanMinimize().ok().map(|value|value.as_bool())}));
         }
+        if let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationGridPattern>(UIA_GridPatternId)
+        {
+            states.insert("grid".into(), json!({"rows":pattern.CurrentRowCount().ok(),"columns":pattern.CurrentColumnCount().ok()}));
+        }
+        if let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationGridItemPattern>(UIA_GridItemPatternId)
+        {
+            states.insert("grid_item".into(), json!({"row":pattern.CurrentRow().ok(),"column":pattern.CurrentColumn().ok(),"row_span":pattern.CurrentRowSpan().ok(),"column_span":pattern.CurrentColumnSpan().ok()}));
+        }
+        if let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationTablePattern>(UIA_TablePatternId)
+        {
+            states.insert("table".into(), json!({"row_or_column_major":pattern.CurrentRowOrColumnMajor().ok().map(|value|value.0)}));
+        }
+        if let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationDockPattern>(UIA_DockPatternId)
+        {
+            states.insert(
+                "dock".into(),
+                json!({"position":pattern.CurrentDockPosition().ok().map(|value|value.0)}),
+            );
+        }
+        if let Ok(pattern) = element
+            .GetCurrentPatternAs::<IUIAutomationMultipleViewPattern>(UIA_MultipleViewPatternId)
+        {
+            states.insert(
+                "multiple_view".into(),
+                json!({"current":pattern.CurrentCurrentView().ok()}),
+            );
+        }
+        if let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationSelectionPattern2>(UIA_SelectionPattern2Id)
+        {
+            states.insert(
+                "selection2".into(),
+                json!({"item_count":pattern.CurrentItemCount().ok()}),
+            );
+        }
+        if let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationTransformPattern2>(UIA_TransformPattern2Id)
+        {
+            states.insert("transform2".into(), json!({"can_zoom":pattern.CurrentCanZoom().ok().map(|value|value.as_bool()),"zoom":pattern.CurrentZoomLevel().ok(),"zoom_minimum":pattern.CurrentZoomMinimum().ok(),"zoom_maximum":pattern.CurrentZoomMaximum().ok()}));
+        }
+        if let Ok(pattern) = element.GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(
+            UIA_LegacyIAccessiblePatternId,
+        ) {
+            states.insert("legacy".into(), json!({"role":pattern.CurrentRole().ok(),"state":pattern.CurrentState().ok(),"child_id":pattern.CurrentChildId().ok(),
+                "description":pattern.CurrentDescription().ok().map(|value|value.to_string()),"default_action":pattern.CurrentDefaultAction().ok().map(|value|value.to_string()),
+                "value":(password==Some(false)).then(||pattern.CurrentValue().ok().map(|value|value.to_string())).flatten()}));
+        }
         json!({"runtime_id":runtime_id(element),"name":element.CurrentName().ok().map(|value|value.to_string()),
             "automation_id":element.CurrentAutomationId().ok().map(|value|value.to_string()),"control_type":element.CurrentControlType().ok().map(|value|value.0),
             "class_name":element.CurrentClassName().ok().map(|value|value.to_string()),"password":password,
@@ -423,7 +486,16 @@ fn inspect(element: &IUIAutomationElement) -> Value {
 pub fn is_mutating(params: &Value) -> bool {
     !matches!(
         params["operation"].as_str().unwrap_or("snapshot"),
-        "snapshot" | "inspect" | "text" | "text-selection"
+        "snapshot"
+            | "inspect"
+            | "text"
+            | "text-selection"
+            | "grid-item"
+            | "table-headers"
+            | "table-item-headers"
+            | "selection"
+            | "containing-grid"
+            | "selection-container"
     )
 }
 
@@ -474,6 +546,16 @@ fn validate_request(params: &Value) -> Result<&str, String> {
         | "window-close" => &["target"],
         "set-value" | "set-range-value" | "multiple-view-set" => &["target", "value"],
         "text" | "text-selection" => &["target", "max_chars"],
+        "grid-item" => &["target", "row", "column"],
+        "table-headers" | "table-item-headers" => &["target", "max_items"],
+        "selection" => &[
+            "target",
+            "max_items",
+            "strategy",
+            "scan_max_nodes",
+            "scan_max_depth",
+        ],
+        "containing-grid" | "selection-container" => &["target"],
         "scroll" => &["target", "horizontal_amount", "vertical_amount"],
         "set-scroll-percent" => &["target", "horizontal_percent", "vertical_percent"],
         "window-state" => &["target", "state"],
@@ -488,6 +570,38 @@ fn validate_request(params: &Value) -> Result<&str, String> {
             && !extras.contains(&key.as_str())
     }) {
         return Err("unsupported UIA parameter for this operation".into());
+    }
+    if operation == "grid-item" {
+        collections::coordinate(params, "row")?;
+        collections::coordinate(params, "column")?;
+    }
+    if matches!(
+        operation,
+        "table-headers" | "table-item-headers" | "selection"
+    ) {
+        collections::limit(params)?;
+    }
+    if operation == "selection"
+        && params.get("strategy").is_some_and(|value| {
+            !value
+                .as_str()
+                .is_some_and(|value| ["provider", "items"].contains(&value))
+        })
+    {
+        return Err("UIA selection strategy must be provider or items".into());
+    }
+    for (name, maximum) in [("scan_max_nodes", 5000), ("scan_max_depth", 128)] {
+        if let Some(value) = params.get(name) {
+            if operation != "selection" || params["strategy"].as_str() != Some("items") {
+                return Err("UIA selection scan limits require the items strategy".into());
+            }
+            if !value
+                .as_u64()
+                .is_some_and(|value| (1..=maximum).contains(&value))
+            {
+                return Err(format!("UIA {name} must be between 1 and {maximum}"));
+            }
+        }
     }
     Ok(operation)
 }
@@ -793,7 +907,7 @@ pub fn handle(
     let action = is_mutating(params)
         .then(|| Action::parse(operation, params))
         .transpose()?;
-    let (_com, _automation, walker, root) = connect(hwnd, params)?;
+    let (_com, automation, walker, root) = connect(hwnd, params)?;
     let element = find_target(&root, &walker, &target, params)?;
     // Do not let a stale HWND/closed framework ID resolve to a replacement
     // window during the native provider traversal.
@@ -801,6 +915,12 @@ pub fn handle(
     validate_root(&root, hwnd)?;
     if operation == "inspect" {
         return Ok(json!({"source":"windows-uia","element":inspect(&element)}));
+    }
+    if collections::OPERATIONS.contains(&operation) {
+        let result = collections::read(hwnd, &automation, &root, &element, operation, params)?;
+        revalidate()?;
+        validate_root(&root, hwnd)?;
+        return Ok(result);
     }
     if matches!(operation, "text" | "text-selection") {
         if unsafe { element.CurrentIsPassword() }
@@ -887,6 +1007,15 @@ mod tests {
             json!({"max_depth":0}),
             json!({"patterns":"false"}),
             json!({"operation":"invoke","value":"must not be ignored"}),
+            json!({"operation":"grid-item","row":-1,"column":0}),
+            json!({"operation":"grid-item","row":0,"column":1000001}),
+            json!({"operation":"grid-item","row":0}),
+            json!({"operation":"selection","max_items":0}),
+            json!({"operation":"selection","strategy":"dom"}),
+            json!({"operation":"selection","strategy":"items","scan_max_nodes":0}),
+            json!({"operation":"selection","scan_max_depth":1}),
+            json!({"operation":"table-headers","max_items":257}),
+            json!({"operation":"selection-container","max_items":1}),
             json!({"view":"desktop"}),
         ] {
             assert!(validate_request(&params).is_err());
@@ -908,6 +1037,7 @@ mod tests {
         assert!(Action::parse("set-value", &json!({"value":""})).is_ok());
         assert!(Action::parse("set-scroll-percent", &json!({"vertical_percent":100})).is_ok());
         assert!(!is_mutating(&json!({"operation":"text"})));
+        assert!(!is_mutating(&json!({"operation":"selection"})));
         assert!(is_mutating(&json!({"operation":"text-select"})));
     }
 }
