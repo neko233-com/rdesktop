@@ -145,6 +145,16 @@ relations, bounded arrays, successful empty COM properties, password
 descriptors and foreign/closed/stale identities. Hidden runs preserve actual
 provider availability without showing the window or substituting engine AX.
 
+The 0.1.14 release candidate also repeated three NVDA groups on its newly
+compiled production application without `native-agent`: field label/help and
+landmarks, physical Tab/Enter skip navigation, and physical typing/Enter to
+the real Rust handler. Its actual status node and Speech Viewer both showed
+`Hello, Reader fourteen!`. This EXE SHA-256 was
+`10fd36f53e365c5760051ec60dc6f86ce234b0e0e3b65a6b3c627d974ad5e872`.
+Its independent isolation run rejected development activation and completed
+with normal exit. This version-specific production evidence is separate from
+the earlier Narrator baseline and the error-description regression above.
+
 ## Remaining acceptance
 
 Speech Viewer and Speech Recap prove emitted utterances, not audible
