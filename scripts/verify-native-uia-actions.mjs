@@ -12,6 +12,7 @@ async function call(command,params={},expected=200){const response=await fetch(`
 const main=(await call('windows')).windows.find(window=>window.title==='rdesktop Native Agent');assert(main);
 const infoResponse=await fetch(`${session.url}/__rdesktop__/info`,{headers});assert.equal(infoResponse.status,200);
 const info=await infoResponse.json();assert(info.capabilities.uia.operations.includes('text-select'));assert(info.capabilities.uia.operations.includes('resize'));
+assert.equal(info.capabilities.uia.client,'CUIAutomation8');assert.equal(info.capabilities.uia.connection_timeout_ms,1000);assert.equal(info.capabilities.uia.transaction_timeout_ms,1500);assert.equal(info.capabilities.uia.request_deadline_ms,20000);assert.equal(info.capabilities.uia.deadline_cancels_native_operation,false);
 const deniedGet=await fetch(`${session.url}/__rdesktop__/agent/uia?window=${main.id}&operation=invoke`,{headers});assert.equal(deniedGet.status,405);
 const window=main.id;const req=(command,params={},expected=200)=>call(command,{window,...params},expected);
 const evaluate=expression=>req('evaluate',{expression});const uia=(operation,target,params={},expected=200)=>req('uia',{operation,target,...params},expected);

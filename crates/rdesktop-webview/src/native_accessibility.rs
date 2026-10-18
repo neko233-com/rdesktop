@@ -75,6 +75,23 @@ impl Drop for Com {
     }
 }
 
+fn automation_client() -> Result<IUIAutomation, String> {
+    // The legacy CUIAutomation class does not expose IUIAutomation2. Silently
+    // ignoring that cast leaves provider calls without the configured timeout.
+    let client: IUIAutomation2 =
+        unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }
+            .map_err(|error| error.to_string())?;
+    unsafe {
+        client
+            .SetConnectionTimeout(1000)
+            .map_err(|error| error.to_string())?;
+        client
+            .SetTransactionTimeout(1500)
+            .map_err(|error| error.to_string())?;
+    }
+    client.cast().map_err(|error| error.to_string())
+}
+
 fn connect(
     hwnd: isize,
     pid: u32,
@@ -92,15 +109,7 @@ fn connect(
         .ok()
         .map_err(|e| e.to_string())?;
     let com = Com;
-    let automation: IUIAutomation =
-        unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
-            .map_err(|e| e.to_string())?;
-    if let Ok(client) = automation.cast::<IUIAutomation2>() {
-        unsafe {
-            client.SetConnectionTimeout(1000).ok();
-            client.SetTransactionTimeout(1500).ok();
-        }
-    }
+    let automation = automation_client()?;
     let walker = unsafe {
         match params["view"].as_str().unwrap_or("raw") {
             "raw" => automation.RawViewWalker(),
@@ -1064,6 +1073,23 @@ pub fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automation_client_supports_provider_timeouts() {
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+            .ok()
+            .unwrap();
+        let _com = Com;
+        let automation = automation_client().unwrap();
+        let client = automation
+            .cast::<IUIAutomation2>()
+            .expect("UIA client must support provider deadlines");
+        unsafe {
+            client.SetConnectionTimeout(1000).unwrap();
+            client.SetTransactionTimeout(1500).unwrap();
+            assert_eq!(client.ConnectionTimeout().unwrap(), 1000);
+            assert_eq!(client.TransactionTimeout().unwrap(), 1500);
+        }
+    }
     #[test]
     fn targets_do_not_accept_snapshot_indices_arbitrary_handles_or_unbounded_ids() {
         for target in [

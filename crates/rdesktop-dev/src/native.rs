@@ -21,6 +21,7 @@ use crate::server::RecordingStore;
 
 pub const NATIVE_AGENT_PREFIX: &str = "/__rdesktop__/agent";
 const MAX_RESPONSE: usize = 32 * 1024 * 1024;
+pub const UIA_REQUEST_TIMEOUT_MS: u64 = 20_000;
 pub const IPC_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 pub const IPC_MAX_TIMEOUT_MS: u64 = 600_000;
 pub const IPC_COMPLETION_GRACE_MS: u64 = 2_000;
@@ -290,6 +291,20 @@ async fn call(
     dispatch(state, command, params).await
 }
 
+async fn await_backend(
+    task: tokio::task::JoinHandle<Result<Value, String>>,
+    deadline: Option<Duration>,
+) -> Result<Result<Value, String>, StatusCode> {
+    let result = if let Some(deadline) = deadline {
+        tokio::time::timeout(deadline, task)
+            .await
+            .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+    } else {
+        task.await
+    };
+    result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 async fn dispatch(state: AgentState, command: String, params: Value) -> Response {
     if !params.is_object() {
         return failure(StatusCode::BAD_REQUEST, "parameters must be an object");
@@ -302,11 +317,14 @@ async fn dispatch(state: AgentState, command: String, params: Value) -> Response
     };
     let screenshot = matches!(command.as_str(), "screenshot" | "native-screenshot");
     let native_screenshot = command == "native-screenshot";
-    let result = tokio::task::spawn_blocking(move || {
+    let deadline = (command == "uia").then_some(Duration::from_millis(UIA_REQUEST_TIMEOUT_MS));
+    let task = tokio::task::spawn_blocking(move || {
+        // A deadline ends the HTTP wait, not a native operation. Retain its
+        // capacity permit until the worker actually returns; never replay it.
         let _permit = permit;
         state.backend.request(&command, params)
-    })
-    .await;
+    });
+    let result = await_backend(task, deadline).await;
     match result {
         Ok(Ok(value)) => {
             let bytes = if screenshot {
@@ -367,10 +385,9 @@ async fn dispatch(state: AgentState, command: String, params: Value) -> Response
                 .unwrap()
         }
         Ok(Err(error)) => failure(StatusCode::UNPROCESSABLE_ENTITY, &error),
-        Err(_) => failure(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "native agent worker failed",
-        ),
+        Err(StatusCode::GATEWAY_TIMEOUT) => failure(StatusCode::GATEWAY_TIMEOUT,
+            "UIA request deadline elapsed; the native outcome is unknown, may still complete, and must not be replayed"),
+        Err(status) => failure(status, "native agent worker failed"),
     }
 }
 
@@ -452,6 +469,33 @@ mod tests {
 
     use super::*;
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn native_deadline_keeps_capacity_until_the_original_worker_returns() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().acquire_owned().await.unwrap();
+        let (release, wait) = mpsc::channel();
+        let (finished, done) = oneshot::channel();
+        let task = tokio::task::spawn_blocking(move || {
+            wait.recv().unwrap();
+            drop(permit);
+            let _ = finished.send(());
+            Ok(json!({"completed":true}))
+        });
+        let result = await_backend(task, Some(Duration::from_millis(10))).await;
+        assert_eq!(result.unwrap_err(), StatusCode::GATEWAY_TIMEOUT);
+        assert!(capacity.try_acquire().is_err());
+        release.send(()).unwrap();
+        done.await.unwrap();
+        assert!(capacity.try_acquire().is_ok());
+        let quick = tokio::task::spawn_blocking(|| Ok(json!({"completed":true})));
+        assert_eq!(
+            await_backend(quick, Some(Duration::from_secs(1)))
+                .await
+                .unwrap()
+                .unwrap(),
+            json!({"completed":true})
+        );
+    }
     struct Backend;
     impl NativeAgentBackend for Backend {
         fn request(&self, command: &str, params: Value) -> Result<Value, String> {

@@ -597,6 +597,8 @@ impl NativeAgentBackend for Backend {
             "collections":{"default_max_items":32,"maximum_max_items":256,"selection_strategies":["provider","items"],"default_scan_max_nodes":1000,"maximum_scan_max_nodes":5000,"default_scan_max_depth":64,"maximum_scan_max_depth":128},
             "relations":["described-by","labeled-by","controller-for","flows-to","flows-from"],
             "description_properties":["help_text","full_description"],
+            "client":"CUIAutomation8","connection_timeout_ms":1000,"transaction_timeout_ms":1500,
+            "request_deadline_ms":rdesktop_dev::native::UIA_REQUEST_TIMEOUT_MS,"deadline_cancels_native_operation":false,
             "pattern_support":"provider-dependent; unsupported patterns fail without a DOM fallback"},
             "native_windows":{"command":"native-windows","uia_parameter":"native_window","scope":"native owner chain under the selected renderer; OS broker windows also require a fresh immediate raw UIA child relation","maximum_windows":64,"modal_inspection":true},
             "native_screenshot":{"source":"windows-graphics-capture","includes_os_frame":true,"requires_visible":true,"maximum_pixels":16777216,"minimum_windows_build":18362}})

@@ -263,6 +263,9 @@ The poll timer is created only for registered callbacks, pending Promises or
 released references, and stops when none remain. A synchronous-only plugin does
 not issue idle event polls; native acceptance counts those requests before its
 first asynchronous operation. Complete callback retirement remains a gate.
+Each next poll is scheduled after the previous reply, leaving a real delay even
+when transport is slow. Native acceptance injects 60 ms of synchronous transport
+latency and verifies that successive polls still leave time for other work.
 
 ## Repeating worker tests
 

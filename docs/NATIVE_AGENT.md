@@ -73,6 +73,14 @@ Read `url` and `token` from the discovery JSON. The listener binds an ephemeral
 health and info. Browser `Origin` headers and a mismatched `Host` are rejected.
 There is no permissive CORS layer or unauthenticated CDP socket.
 
+Windows UIA uses `CUIAutomation8`, with checked connection and transaction
+timeouts of 1000 and 1500 ms. The legacy `CUIAutomation` class does not expose
+the timeout interface. Initialization fails if configuring these limits fails.
+UIA HTTP requests also have a 20000 ms deadline, reported in capabilities.
+A 504 ends the HTTP wait; it does not cancel a native action. Its outcome is
+unknown, so do not replay a mutation automatically. The original worker keeps
+its capacity permit until it returns, including after the HTTP deadline.
+
 The routes below use `/__rdesktop__/agent/`. POST bodies are JSON objects.
 Read commands also support GET with `window` and `selector` query parameters.
 
