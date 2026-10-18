@@ -1,4 +1,4 @@
-use rdesktop_node::{renderer::RendererBridge, NodeConfig, NodeError, NodeRuntime};
+use rdesktop_node::{renderer::RendererBridge, ModuleConfig, NodeConfig, NodeError, NodeRuntime};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -89,6 +89,183 @@ fn renderer_preload_is_not_executed_in_node_and_module_methods_are_real() {
         matches!(error,Err(NodeError::Preload(error)) if error.code.as_deref()==Some("ENOENT"))
     );
     node.close().unwrap();
+}
+
+#[test]
+#[ignore = "requires an explicitly pinned local Node executable"]
+fn module_context_without_preload_is_virtual_scoped_and_still_pins_node() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("index.html"), "<h1>No preload</h1>").unwrap();
+    let mut settings = ModuleConfig::from(config(root.path()));
+    settings.preload = None;
+    let node = NodeRuntime::start_modules(settings).unwrap();
+    let metadata = node
+        .module_request(json!({"operation":"bootstrap"}))
+        .unwrap();
+    assert_eq!(metadata["hasPreload"], false);
+    let context = PathBuf::from(metadata["preload"].as_str().unwrap());
+    assert_eq!(
+        context.parent().unwrap().canonicalize().unwrap(),
+        root.path().canonicalize().unwrap()
+    );
+    assert!(!context.exists());
+    let native = node
+        .module_request(json!({"operation":"resolve","name":"node:fs","parent":context}))
+        .unwrap()["value"]
+        .clone();
+    let bytes = call(
+        &node,
+        &get(&node, &native, "readFileSync"),
+        json!([root.path().join("index.html"), "utf8"]),
+    )
+    .unwrap();
+    assert_eq!(bytes["value"], "<h1>No preload</h1>");
+    assert!(
+        matches!(node.module_request(json!({"operation":"preload"})),Err(NodeError::Preload(error)) if error.message.contains("no package preload"))
+    );
+    assert!(matches!(
+        node.module_request(
+            json!({"operation":"resolve","name":"node:fs","parent":root.path().join("forged.cjs")})
+        ),
+        Err(NodeError::Preload(_))
+    ));
+    node.close().unwrap();
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    let mut invalid = ModuleConfig::from(config(root.path()));
+    invalid.preload = None;
+    invalid.executable_sha256 = "0".repeat(64);
+    assert!(matches!(
+        NodeRuntime::start_modules(invalid),
+        Err(NodeError::Configuration(_))
+    ));
+}
+
+#[test]
+#[ignore = "requires an explicitly pinned local Node executable"]
+fn native_descriptors_preserve_accessors_without_invoking_them() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("preload.cjs"), "").unwrap();
+    let node = NodeRuntime::start_modules(config(root.path())).unwrap();
+    let vm = node.module_request(json!({"operation":"resolve","name":"node:vm","parent":root.path().join("preload.cjs")})).unwrap()["value"].clone();
+    let object = call(&node, &get(&node, &vm, "runInNewContext"), json!(["(()=>{let n=0;return Object.defineProperty({readCount:()=>n},'observed',{enumerable:true,get(){n++;return this.saved??7;},set(value){this.saved=value;}});})()"])).unwrap()["value"].clone();
+    let descriptor = node
+        .module_request(json!({"operation":"descriptor","id":object["id"],"key":"observed"}))
+        .unwrap()["value"]
+        .clone();
+    assert_eq!(descriptor["accessor"], true);
+    assert!(descriptor.get("value").is_none());
+    let count = get(&node, &object, "readCount");
+    assert_eq!(call(&node, &count, json!([])).unwrap()["value"], 0);
+    node.module_request(json!({"operation":"call","id":descriptor["set"]["id"],"receiver":object["id"],"args":[92]})).unwrap();
+    assert_eq!(call(&node, &count, json!([])).unwrap()["value"], 0);
+    assert_eq!(get(&node, &object, "observed"), 92);
+    assert_eq!(call(&node, &count, json!([])).unwrap()["value"], 1);
+    assert_eq!(
+        node.module_request(json!({"operation":"descriptor","id":object["id"],"key":"absent"}))
+            .unwrap()["value"]["exists"],
+        false
+    );
+    node.close().unwrap();
+}
+
+#[test]
+#[ignore = "requires an explicitly pinned local Node executable"]
+fn transport_retransmission_returns_one_result_and_never_repeats_file_effects() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("preload.cjs"), "").unwrap();
+    let node = NodeRuntime::start_modules(config(root.path())).unwrap();
+    let native = node.module_request(json!({"operation":"resolve","name":"node:fs","parent":root.path().join("preload.cjs")})).unwrap()["value"].clone();
+    let append = get(&node, &native, "appendFileSync");
+    let file = root.path().join("one-effect.txt");
+    let first = json!({"transportId":1,"operation":"call","rendererMemory":true,"memory":[],"id":append["id"],"receiver":append["receiver"],"args":[file,"once"]});
+    let result = node.module_request(first.clone()).unwrap();
+    assert_eq!(node.module_request(first.clone()).unwrap(), result);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "once");
+    let mut conflict = first.clone();
+    conflict["args"][1] = json!("different");
+    assert!(
+        matches!(node.module_request(conflict), Err(NodeError::Preload(error)) if error.code.as_deref()==Some("RDESKTOP_NODE_REQUEST_CONFLICT"))
+    );
+    node.module_request(json!({"transportId":2,"operation":"events"}))
+        .unwrap();
+    assert!(
+        matches!(node.module_request(first), Err(NodeError::Preload(error)) if error.code.as_deref()==Some("RDESKTOP_NODE_STALE_REQUEST"))
+    );
+    let vm = node.module_request(json!({"operation":"resolve","name":"node:vm","parent":root.path().join("preload.cjs")})).unwrap()["value"].clone();
+    let fail = call(&node, &get(&node, &vm, "runInNewContext"), json!(["file=>{fs.appendFileSync(file,'-failed');throw new Error('after-effect');}",{"$rdesktop":"object","entries":[["fs",{"$rdesktop":"reference","id":native["id"]}]]}])).unwrap()["value"].clone();
+    let unknown = json!({"transportId":3,"operation":"call","id":fail["id"],"args":[file]});
+    assert!(
+        matches!(node.module_request(unknown.clone()), Err(NodeError::Preload(error)) if error.message=="after-effect")
+    );
+    assert!(
+        matches!(node.module_request(unknown), Err(NodeError::Preload(error)) if error.code.as_deref()==Some("RDESKTOP_NODE_UNKNOWN_RESULT"))
+    );
+    assert_eq!(fs::read_to_string(file).unwrap(), "once-failed");
+    node.close().unwrap();
+}
+
+#[test]
+#[ignore = "requires an explicitly pinned local Node executable"]
+fn native_http_reuses_only_authenticated_connections_with_bounded_idle() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("preload.cjs"), "").unwrap();
+    fs::write(root.path().join("index.html"), "<h1>Private transport</h1>").unwrap();
+    let bridge = RendererBridge::start(config(root.path()), "index.html").unwrap();
+    let url = bridge.url().strip_prefix("http://").unwrap();
+    let (address, target) = url.split_once('/').unwrap();
+    let token = target.split('/').next().unwrap();
+    let mut socket = TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let send = |socket: &mut TcpStream, body: &str, origin: &str| {
+        write!(socket, "POST /{token}/__node HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nX-Rdesktop-Node: {token}\r\nX-Rdesktop-Document: 11111111111111111111111111111111\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        let header = String::from_utf8(header).unwrap();
+        let length: usize = header
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).unwrap();
+        (header, body)
+    };
+    let origin = format!("http://{address}");
+    let (attached, _) = send(&mut socket, r#"{"operation":"attach"}"#, &origin);
+    assert!(attached.contains("Connection: keep-alive"));
+    let (next, body) = send(
+        &mut socket,
+        r#"{"operation":"events","transportId":2}"#,
+        &origin,
+    );
+    assert!(next.starts_with("HTTP/1.1 200"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["success"],
+        true
+    );
+    let started = Instant::now();
+    let mut byte = [0];
+    assert_eq!(socket.read(&mut byte).unwrap(), 0);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let mut denied = TcpStream::connect(address).unwrap();
+    denied
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let (header, _) = send(
+        &mut denied,
+        r#"{"operation":"events","transportId":3}"#,
+        "http://unrelated.invalid",
+    );
+    assert!(header.starts_with("HTTP/1.1 403"));
+    assert!(header.contains("Connection: close"));
 }
 
 #[test]

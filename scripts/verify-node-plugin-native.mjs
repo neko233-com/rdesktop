@@ -15,6 +15,7 @@ const packageRoot=mode==='public'?resolve(publicPackage):join(runRoot,'package')
 if(mode!=='public'){await fs.mkdir(packageRoot);for(const file of ['index.html','preload.cjs','helper.cjs','cycle-a.cjs','cycle-b.cjs','late.cjs','shadow.cjs','buffer-cases.cjs','memory-cases.cjs'])await fs.copyFile(join(repo,'examples/node_plugin/fixtures',file),join(packageRoot,file));}
 const nodeExe=process.env.RDESKTOP_TEST_NODE;assert(nodeExe);const nodeSha=createHash('sha256').update(await fs.readFile(nodeExe)).digest('hex');assert.equal(nodeSha,process.env.RDESKTOP_TEST_NODE_SHA256,'Explicitly pin the selected Node binary');
 const sessionFile=join(runRoot,'session.json');const executable=process.env.RDESKTOP_PLUGIN_FIXTURE_EXE||join(repo,'target/debug/node_plugin.exe');
+process.env.RDESKTOP_PLUGIN_DATA_DIRECTORY=join(runRoot,'webview-profile');
 const snapshot=()=>JSON.parse(execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command','Get-CimInstance Win32_Process | Select-Object Name,ProcessId,ParentProcessId | ConvertTo-Json -Compress'],{windowsHide:true,encoding:'utf8'}));
 async function packageHashes(){const files=execFileSync('git',['-C',packageRoot,'ls-files','-z'],{windowsHide:true,encoding:'utf8'}).split('\0').filter(Boolean);return Object.fromEntries(await Promise.all(files.map(async file=>[file,createHash('sha256').update(await fs.readFile(join(packageRoot,file))).digest('hex')])));}
 let originalHashes;if(mode==='public'){assert.equal(execFileSync('git',['-C',packageRoot,'rev-parse','HEAD'],{windowsHide:true,encoding:'utf8'}).trim(),'8a3f257591935cf4d2dd4baa599f3c20fc1b7e5d');originalHashes=await packageHashes();}
@@ -63,7 +64,7 @@ try{
   let actualMemory;
   if(hidden) actualMemory=await evaluate('window.runMemoryCases()');
   else {
-   const runMemory=(await call('uia',{window:captureWindow,max_nodes:2000})).nodes.find(node=>node.name==='Run native memory cases'&&node.control_type===50000);assert(runMemory);
+   const runMemory=await until(async()=>(await call('uia',{window:captureWindow,max_nodes:2000})).nodes.find(node=>node.name==='Run native memory cases'&&node.control_type===50000),'native memory button');
    await call('uia',{window:captureWindow,operation:'invoke',target:{runtime_id:runMemory.runtime_id}});
    actualMemory=await until(async()=>{const failure=await evaluate('window.memoryFailure??null');assert(!failure,failure);return evaluate('window.memoryResult??null');},'native UIA memory result');
   }

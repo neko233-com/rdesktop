@@ -293,6 +293,48 @@ fixed timer. Worker startup flags are removed from `process.execArgv` so an
 ordinary `child_process.fork` does not inherit the internal bootstrap. This is
 not a sandbox; preloads and native modules retain full Node authority.
 
+### Host APIs without a package preload
+
+`ModuleConfig` has the same executable/hash/root/deadline fields as `NodeConfig`,
+with an optional `preload`. `NodeRuntime::start_modules`, `RendererModules` and
+`RendererBridge` accept either configuration; existing `NodeConfig` calls still
+select and validate their original preload. Direct workers still require one.
+With `ModuleConfig { preload: None, ... }`, Node creates a random in-memory
+resolution anchor inside the canonical package root. That filename is never
+written or executed, and callers cannot replace it with arbitrary nonexistent
+parent paths. Host-selected worker module getters and immediate callbacks work
+without fabricating a package preload. `NodeGlobals::PreloadOnly` continues to
+keep require/process/Buffer out of page globals.
+
+The example accepts `RDESKTOP_PLUGIN_PRELOAD=none` for this path. Repeat native
+addon acceptance with `--no-preload` (binding mode) and optionally `--headless`.
+Both native modes pass the 14 Sharp comparisons plus enumeration/JSON of 256
+fields and an accessor. A descriptor query or `Object.keys` does not invoke the
+getter; JSON calls it once and the returned accessor remains callable. This
+regression reproduced an unintended getter execution in the old descriptor
+projection, which now distinguishes accessors from data properties.
+
+Synchronous RPC retains one completed XMLHttpRequest for reuse, with separate
+active requests for reentrant calls. The burst uses two request objects, but
+isolated cold profiles also exposed `ERR_NO_BUFFER_SPACE` with short-lived TCP
+connections. The standalone bridge now reuses authenticated Node connections,
+up to 512 frames with a 250-ms idle limit. Assets and rejected requests close
+their connection. An owned headless network trace of the same acceptance fell
+from 896 TCP connects to seven, with no buffer error in the latter trace.
+
+Every renderer request also has an ordered transport ID and content fingerprint.
+The worker retains one exact response of at most the existing 4-MiB frame limit;
+retransmission returns it without repeating an operation. Reused IDs with other
+data, evicted IDs and unknown results fail explicitly before dispatch. This
+also covers browser-internal HTTP reconnection; ordinary JS calls are never
+automatically retried. Copy-only Buffer fault/retry checks remain. Private
+origin/document checks still apply to every frame. No external dependency or
+runtime payload is added. Application asset servers must implement bounded
+connection reuse separately when embedding `RendererModules`.
+
+Native acceptance now uses a unique WebView2 data directory per run, avoiding
+shared-profile browser-process ownership between simultaneous example hosts.
+
 The worker source currently exceeds Windows' command-line character limit. A
 small `--eval` bootstrap reads a length-prefixed, at-most-256-KiB source from the
 private stdin pipe, leaving the first JSON request intact. The existing writer

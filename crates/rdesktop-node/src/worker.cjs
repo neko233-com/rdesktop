@@ -78,13 +78,12 @@ async function request(message) {
   if (message.operation === "load") {
     if (loaded) throw new Error("A Node runtime can load only one preload.");
     const root = fs.realpathSync(nodePath(message.root));
-    const preload = fs.realpathSync(nodePath(message.preload));
-    const relative = path.relative(root, preload);
-    if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) {
-      throw new Error("Preload must be a file inside its package root.");
-    }
-    if (!fs.statSync(preload).isFile() || fs.statSync(preload).size > 1024 * 1024) {
-      throw new Error("Preload is not a bounded regular file.");
+    if (!fs.statSync(root).isDirectory()) throw new Error("Package root must be a directory.");
+    const preload = message.preload == null && message.modules === true ? null : fs.realpathSync(nodePath(message.preload));
+    if (preload !== null) {
+      const relative = path.relative(root, preload);
+      if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error("Preload must be a file inside its package root.");
+      if (!fs.statSync(preload).isFile() || fs.statSync(preload).size > 1024 * 1024) throw new Error("Preload is not a bounded regular file.");
     }
     process.chdir(root);
     loaded = true;

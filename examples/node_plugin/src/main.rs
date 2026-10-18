@@ -6,7 +6,7 @@ use rdesktop_core::{
 };
 use rdesktop_node::{
     renderer::{NodeGlobals, RendererBridge, RendererNodeOptions},
-    NodeConfig,
+    ModuleConfig,
 };
 use rdesktop_webview::{NativeEvent, NativeWindowOptions, WebViewRenderer};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -27,15 +27,17 @@ fn main() -> anyhow::Result<()> {
         Err(error) => return Err(error.into()),
     };
     let bridge = RendererBridge::start_with_options(
-        NodeConfig {
+        ModuleConfig {
             executable: PathBuf::from(
                 std::env::var_os("RDESKTOP_TEST_NODE")
                     .ok_or_else(|| anyhow::anyhow!("select an explicit Node executable"))?,
             ),
             executable_sha256: std::env::var("RDESKTOP_TEST_NODE_SHA256")?,
-            preload: root.join(
-                std::env::var("RDESKTOP_PLUGIN_PRELOAD").unwrap_or_else(|_| "preload.cjs".into()),
-            ),
+            preload: match std::env::var("RDESKTOP_PLUGIN_PRELOAD") {
+                Ok(value) if value == "none" => None,
+                Ok(value) => Some(root.join(value)),
+                Err(_) => Some(root.join("preload.cjs")),
+            },
             package_root: root,
             timeout: Duration::from_secs(3),
         },
@@ -105,9 +107,13 @@ fn main() -> anyhow::Result<()> {
     initialization.push_str(bridge.initialization_script());
     let url = bridge.url().to_owned();
     let window_config = config.window.clone();
-    let profile = std::env::var_os("RDESKTOP_PLUGIN_FIXTURE_FOLDER")
+    let profile = std::env::var_os("RDESKTOP_PLUGIN_DATA_DIRECTORY")
         .map(PathBuf::from)
-        .map(|root| root.join("webview-profile"));
+        .or_else(|| {
+            std::env::var_os("RDESKTOP_PLUGIN_FIXTURE_FOLDER")
+                .map(PathBuf::from)
+                .map(|root| root.join("webview-profile"))
+        });
     let window_thread = std::thread::spawn(move || {
         let parent = if embedded {
             let mut owner = window_config.clone();
@@ -140,7 +146,7 @@ fn main() -> anyhow::Result<()> {
                 initialization_script: initialization,
                 ipc_enabled: true,
                 parent_window: parent,
-                data_directory: embedded.then_some(profile).flatten(),
+                data_directory: profile,
                 ..Default::default()
             },
         )?;

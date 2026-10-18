@@ -5,9 +5,9 @@ function rdesktopNodeRenderer(options) {
   const references = new WeakMap(), proxies = new Map(), callbacks = new Map(), callbackIds = new WeakMap();
   const callbackAcks = new Map();
   const promises = new Map(), released = new Set(), retained = new Map(), modules = new Map();
-  let nodeProcess, nodeSetImmediate, nodeClearImmediate, memory;
+  let nodeProcess, nodeSetImmediate, nodeClearImmediate, memory, idleRequest = null;
   const startTimer = window.setTimeout.bind(window), stopTimer = window.clearTimeout.bind(window);
-  let sequence = 0, callbackEpoch = 0, closed = false, polling = false, terminalError = null, timer = null;
+  let sequence = 0, callbackEpoch = 0, transportSequence = 0, closed = false, polling = false, terminalError = null, timer = null;
   const finalizer = new FinalizationRegistry(({ id, key }) => {
     if (!proxies.get(key)?.deref()) proxies.delete(key);
     const count = (retained.get(id) || 1) - 1;
@@ -33,10 +33,15 @@ function rdesktopNodeRenderer(options) {
     if (request.operation !== 'buffer' && callbackAcks.size) request.callbackAcks = [...callbackAcks].map(([id, epoch]) => ({ id, epoch }));
     if (!['buffer', 'collect-callbacks'].includes(request.operation) && callbacks.size) request.callbackClaims = [...callbacks].map(([id, entry]) => ({ id, epoch: entry.epoch }));
     if (memory && request.operation !== 'buffer') request.memory = memory.prepare(request);
+    request.transportId = ++transportSequence;
     const end = Date.now() + 500;
     let replayedBuffer = false;
-    for (;;) {
-      const xhr = new XMLHttpRequest(); xhr.open('POST', options.base + '__node', false);
+    // Reuse one completed request. A synchronous burst cannot yield to browser
+    // cleanup between property reads; allocating an XHR for each read can exhaust
+    // native request buffers. A reentrant call gets a separate active request.
+    const xhr = idleRequest || new XMLHttpRequest(); idleRequest = null;
+    try { for (;;) {
+      xhr.open('POST', options.base + '__node', false);
       xhr.setRequestHeader('Content-Type', 'application/json'); xhr.setRequestHeader('X-Rdesktop-Node', options.token); xhr.setRequestHeader('X-Rdesktop-Document', documentIdentity);
       try { xhr.send(JSON.stringify(request)); }
       catch (cause) {
@@ -56,7 +61,7 @@ function rdesktopNodeRenderer(options) {
       retireCallbacks(result.data.callbackRetirements);
       if (result.data.thrown) throw error(result.data.thrown);
       return result.data;
-    }
+    } } finally { if (!idleRequest && !closed) idleRequest = xhr; }
   }
   function pack(value, seen = new Set()) {
     if (value === undefined) return { $rdesktop: 'undefined' };
@@ -114,7 +119,7 @@ function rdesktopNodeRenderer(options) {
       has(_target, key) { return Reflect.has(target, key) || rpc({ operation: 'has', id: value.id, key }).value; },
       deleteProperty(_target, key) { const own = Reflect.getOwnPropertyDescriptor(target, key); if (own && !own.configurable) return false; return rpc({ operation: 'delete', id: value.id, key }).value; },
       ownKeys() { return [...new Set([...Reflect.ownKeys(target), ...rpc({ operation: 'keys', id: value.id }).value])]; },
-      getOwnPropertyDescriptor(_target, key) { const own = Reflect.getOwnPropertyDescriptor(target, key); if (own && !own.configurable) return own; const descriptor = rpc({ operation: 'descriptor', id: value.id, key }).value; return descriptor.exists ? { configurable: true, enumerable: descriptor.enumerable, writable: descriptor.writable, value: unpack(descriptor.value, proxy) } : undefined; },
+      getOwnPropertyDescriptor(_target, key) { const own = Reflect.getOwnPropertyDescriptor(target, key); if (own && !own.configurable) return own; const descriptor = rpc({ operation: 'descriptor', id: value.id, key }).value; return !descriptor.exists ? undefined : { configurable: true, enumerable: descriptor.enumerable, ...(descriptor.accessor ? { get: unpack(descriptor.get), set: unpack(descriptor.set) } : { writable: descriptor.writable, value: unpack(descriptor.value, proxy) }) }; },
       apply(_target, thisArg, args) { void owner; return unpack(rpc({ operation: 'call', id: value.id, receiver: value.receiver || references.get(thisArg), args: args.map(arg => pack(arg)) }).value); },
       construct(_target, args) { return unpack(rpc({ operation: 'call', id: value.id, construct: true, args: args.map(arg => pack(arg)) }).value); },
     });
@@ -170,7 +175,7 @@ function rdesktopNodeRenderer(options) {
   Object.defineProperties(window, {
     setImmediate: { value: nodeSetImmediate, configurable: true, writable: true },
     clearImmediate: { value: nodeClearImmediate, configurable: true, writable: true },
-    __RDESKTOP_NODE_STATUS__: { value: Object.freeze({ node: options.node, renderer: 'native-webview', electron: false, nodeGlobals: options.exposeNodeGlobals === false ? 'preload-only' : 'page' }), configurable: false },
+    __RDESKTOP_NODE_STATUS__: { value: Object.freeze({ node: options.node, renderer: 'native-webview', electron: false, nodeGlobals: options.exposeNodeGlobals === false ? 'preload-only' : 'page', preload: options.hasPreload ? 'package' : 'none' }), configurable: false },
   });
   // Native packages can keep their entire JS/stream/native-addon graph in Node
   // while the original preload retains its real document and DOM closures.
@@ -202,7 +207,7 @@ function rdesktopNodeRenderer(options) {
     // native child's event loop. Leave time for painting, input and CDP work.
     finally { polling = false; if (!closed && (callbacks.size || promises.size || released.size || callbackAcks.size)) ensureEvents(); }
   }
-  window.addEventListener('pagehide', () => { closed = true; stopTimer(timer); timer = null; for (const pending of promises.values()) pending.reject(new Error('Renderer closed.')); promises.clear(); callbacks.clear(); callbackAcks.clear(); }, { once: true });
-  try { installWorkerBindings(); load(rpc({ operation: 'preload' })); }
+  window.addEventListener('pagehide', () => { closed = true; idleRequest = null; stopTimer(timer); timer = null; for (const pending of promises.values()) pending.reject(new Error('Renderer closed.')); promises.clear(); callbacks.clear(); callbackAcks.clear(); }, { once: true });
+  try { installWorkerBindings(); if (options.hasPreload) load(rpc({ operation: 'preload' })); }
   catch (cause) { report(cause); throw cause; }
 }

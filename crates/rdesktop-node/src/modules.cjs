@@ -2,6 +2,9 @@
 function createModuleRuntime(root, preload) {
   const fs = require('node:fs'), path = require('node:path'), Module = require('node:module');
   const nativeTypes = require('node:util').types;
+  // createRequire accepts an absolute context filename that need not exist.
+  // The random anchor is used only for resolution; it is never written/loaded.
+  const context = preload || path.join(root, '.rdesktop-context-' + require('node:crypto').randomBytes(16).toString('hex') + '.cjs');
   const references = new Map(), identities = new WeakMap();
   const events = [];
   const memory = createNodeMemory();
@@ -80,7 +83,7 @@ function createModuleRuntime(root, preload) {
   }
   function resolve(name, parent) {
     if (typeof name !== 'string' || name.length > 1024 || typeof parent !== 'string') throw new TypeError('Invalid CommonJS request.');
-    const local = Module.createRequire(inside(parent));
+    const local = Module.createRequire(preload === null && parent === context ? context : inside(parent));
     if (Module.isBuiltin(name)) return { kind: 'native', value: reference(local(name)) };
     const filename = inside(local.resolve(name));
     if (path.extname(filename) === '.node') return { kind: 'native', value: reference(local(filename)) };
@@ -157,7 +160,7 @@ function createModuleRuntime(root, preload) {
     if (!message || typeof message.operation !== 'string') throw new TypeError('Invalid module operation.');
     let value;
     switch (message.operation) {
-      case 'bootstrap': return { preload, root, node: process.versions.node, buffer: bufferApi, token: require('node:crypto').randomBytes(32).toString('hex') };
+      case 'bootstrap': return { preload: context, hasPreload: preload !== null, root, node: process.versions.node, buffer: bufferApi, token: require('node:crypto').randomBytes(32).toString('hex') };
       // Copy-only commands are replayable after a lost HTTP reply. Leave async
       // events for the normal event transport instead of consuming them here.
       case 'buffer': {
@@ -165,14 +168,16 @@ function createModuleRuntime(root, preload) {
         return { ...bufferOperation(message), events: [] };
       }
       case 'resolve': return resolve(message.name, message.parent);
-      case 'preload': return resolve('./' + path.basename(preload), preload);
+      case 'preload': if (preload === null) throw new Error('This module session has no package preload.'); return resolve('./' + path.basename(preload), preload);
       case 'get': value = pack(Reflect.get(get(message.id), message.key), 0, new Set(), message.id); break;
       case 'keys': value = Reflect.ownKeys(get(message.id)).filter(key => typeof key === 'string'); break;
       case 'has': value = Reflect.has(get(message.id), message.key); break;
       case 'delete': value = Reflect.deleteProperty(get(message.id), message.key); break;
       case 'descriptor': {
         const descriptor = Reflect.getOwnPropertyDescriptor(get(message.id), message.key);
-        value = descriptor ? { exists: true, enumerable: !!descriptor.enumerable, writable: !!descriptor.writable, value: pack(Reflect.get(get(message.id), message.key), 0, new Set(), message.id) } : { exists: false }; break;
+        value = !descriptor ? { exists: false } : 'value' in descriptor
+          ? { exists: true, enumerable: !!descriptor.enumerable, writable: !!descriptor.writable, value: pack(descriptor.value, 0, new Set(), message.id) }
+          : { exists: true, enumerable: !!descriptor.enumerable, accessor: true, get: pack(descriptor.get), set: pack(descriptor.set) }; break;
       }
       case 'set': value = Reflect.set(get(message.id), message.key, unpack(message.value)); break;
       case 'call': {
@@ -191,7 +196,7 @@ function createModuleRuntime(root, preload) {
     if (overflow) throw new RangeError('Renderer event queue overflowed; close this runtime.');
     return { value, events: events.splice(0) };
   }
-  return { request(message) {
+  function requestData(message) {
     // Copy-only retries must neither consume events nor change callback leases.
     if (message?.operation === 'buffer') return execute(message);
     callbacks.acknowledge(message?.callbackAcks);
@@ -213,5 +218,25 @@ function createModuleRuntime(root, preload) {
       if (Buffer.byteLength(JSON.stringify(response)) > 4 * 1024 * 1024 - 1024) throw new RangeError('Node memory response exceeds its frame limit.');
       changes.commit(); return response;
     } catch (error) { events.unshift(...(result.events || [])); throw error; }
+  }
+  // A browser may reconnect/retransmit an HTTP POST without returning to JS.
+  // Retain one bounded exact response; an older/unknown result never dispatches
+  // again. Legacy host-side calls without a transport ID do not use this lane.
+  let latestTransportId = 0, latestFingerprint, latestReply;
+  return { request(message) {
+    if (message?.transportId === undefined) return requestData(message);
+    const id = message.transportId;
+    if (!Number.isSafeInteger(id) || id < 1) throw new TypeError('Invalid Node transport request identity.');
+    const fingerprint = require('node:crypto').createHash('sha256').update(JSON.stringify(message)).digest('hex');
+    if (id <= latestTransportId) {
+      if (id < latestTransportId) throw Object.assign(new Error('Node transport request is stale; its operation was not replayed.'), { code: 'RDESKTOP_NODE_STALE_REQUEST' });
+      if (fingerprint !== latestFingerprint) throw Object.assign(new TypeError('Node transport identity was reused for different data.'), { code: 'RDESKTOP_NODE_REQUEST_CONFLICT' });
+      if (latestReply === undefined) throw Object.assign(new Error('Node transport result is unknown; its operation was not replayed.'), { code: 'RDESKTOP_NODE_UNKNOWN_RESULT' });
+      return JSON.parse(latestReply);
+    }
+    latestTransportId = id; latestFingerprint = fingerprint; latestReply = undefined;
+    const result = requestData(message), serialized = JSON.stringify(result);
+    if (Buffer.byteLength(serialized) > 4 * 1024 * 1024 - 1024) throw new RangeError('Node transport response exceeds its frame limit.');
+    latestReply = serialized; return result;
   } };
 }

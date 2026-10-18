@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{mpsc, Mutex, TryLockError},
     time::{Duration, Instant},
@@ -62,6 +62,28 @@ pub struct NodeConfig {
     pub timeout: Duration,
 }
 
+/// A renderer may use Node-backed host APIs without a package preload. Omitting
+/// the preload creates a private module-resolution context, never a source file.
+pub struct ModuleConfig {
+    pub executable: PathBuf,
+    pub executable_sha256: String,
+    pub package_root: PathBuf,
+    pub preload: Option<PathBuf>,
+    pub timeout: Duration,
+}
+
+impl From<NodeConfig> for ModuleConfig {
+    fn from(config: NodeConfig) -> Self {
+        Self {
+            executable: config.executable,
+            executable_sha256: config.executable_sha256,
+            package_root: config.package_root,
+            preload: Some(config.preload),
+            timeout: config.timeout,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct NodeMetadata {
     pub node: String,
@@ -95,10 +117,12 @@ fn valid_timeout(timeout: Duration) -> Result<(), NodeError> {
     Ok(())
 }
 
-fn verified_executable(config: &NodeConfig) -> Result<(PathBuf, File), NodeError> {
-    if config.executable_sha256.len() != 64
-        || !config
-            .executable_sha256
+fn verified_executable(
+    executable: &Path,
+    expected_sha256: &str,
+) -> Result<(PathBuf, File), NodeError> {
+    if expected_sha256.len() != 64
+        || !expected_sha256
             .bytes()
             .all(|value| value.is_ascii_hexdigit())
     {
@@ -106,7 +130,7 @@ fn verified_executable(config: &NodeConfig) -> Result<(PathBuf, File), NodeError
             "expected SHA-256 is required".into(),
         ));
     }
-    let path = fs::canonicalize(&config.executable)?;
+    let path = fs::canonicalize(executable)?;
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
@@ -138,7 +162,7 @@ fn verified_executable(config: &NodeConfig) -> Result<(PathBuf, File), NodeError
         }
         digest.update(&chunk[..count]);
     }
-    if !format!("{:x}", digest.finalize()).eq_ignore_ascii_case(&config.executable_sha256) {
+    if !format!("{:x}", digest.finalize()).eq_ignore_ascii_case(expected_sha256) {
         return Err(NodeError::Configuration(
             "Node executable SHA-256 mismatch".into(),
         ));
@@ -148,30 +172,39 @@ fn verified_executable(config: &NodeConfig) -> Result<(PathBuf, File), NodeError
 
 impl NodeRuntime {
     pub fn start(config: NodeConfig) -> Result<Self, NodeError> {
-        Self::start_mode(config, false)
+        Self::start_mode(config.into(), false)
     }
 
     /// Project Node modules into a native renderer. The preload is selected and
     /// bounded here, but executed by that renderer, where its DOM/callbacks live.
-    pub fn start_modules(config: NodeConfig) -> Result<Self, NodeError> {
-        Self::start_mode(config, true)
+    /// `ModuleConfig` can omit that preload; existing `NodeConfig` callers keep
+    /// their required, validated package entry through the conversion.
+    pub fn start_modules(config: impl Into<ModuleConfig>) -> Result<Self, NodeError> {
+        Self::start_mode(config.into(), true)
     }
 
-    fn start_mode(config: NodeConfig, module_mode: bool) -> Result<Self, NodeError> {
+    fn start_mode(config: ModuleConfig, module_mode: bool) -> Result<Self, NodeError> {
         valid_timeout(config.timeout)?;
         let root = fs::canonicalize(&config.package_root)?;
-        let preload = fs::canonicalize(&config.preload)?;
-        if !root.is_dir()
-            || preload == root
-            || !preload.starts_with(&root)
-            || !preload.is_file()
-            || preload.metadata()?.len() > 1024 * 1024
-        {
+        if !root.is_dir() || (!module_mode && config.preload.is_none()) {
             return Err(NodeError::Configuration(
-                "preload must be a bounded file inside its package root".into(),
+                "a package directory and direct-worker preload are required".into(),
             ));
         }
-        let (executable, verified_file) = verified_executable(&config)?;
+        let preload = config.preload.as_ref().map(fs::canonicalize).transpose()?;
+        if let Some(preload) = &preload {
+            if preload == &root
+                || !preload.starts_with(&root)
+                || !preload.is_file()
+                || preload.metadata()?.len() > 1024 * 1024
+            {
+                return Err(NodeError::Configuration(
+                    "preload must be a bounded file inside its package root".into(),
+                ));
+            }
+        }
+        let (executable, verified_file) =
+            verified_executable(&config.executable, &config.executable_sha256)?;
         let mut command = Command::new(executable);
         let source = format!("\"use strict\";\nconst rdesktopCollectGarbage = globalThis.gc; if (rdesktopCollectGarbage) globalThis.gc = undefined; process.execArgv = [];\n{MEMORY}\n{CALLBACKS}\n{MODULES}\n{WORKER}");
         if source.len() > MAX_BOOTSTRAP_BYTES {

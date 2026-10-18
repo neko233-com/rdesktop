@@ -1,6 +1,6 @@
 //! Experimental CommonJS projection into a real native WebView. All Node
 //! authority belongs to one explicitly trusted package and its private origin.
-use crate::{NodeConfig, NodeError, NodeRuntime};
+use crate::{ModuleConfig, NodeError, NodeRuntime};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -130,11 +130,11 @@ pub struct RendererModules {
 }
 
 impl RendererModules {
-    pub fn start(config: NodeConfig, base_url: &str) -> Result<Self, NodeError> {
+    pub fn start(config: impl Into<ModuleConfig>, base_url: &str) -> Result<Self, NodeError> {
         Self::start_with_globals(config, base_url, NodeGlobals::Page)
     }
     pub fn start_with_globals(
-        config: NodeConfig,
+        config: impl Into<ModuleConfig>,
         base_url: &str,
         globals: NodeGlobals,
     ) -> Result<Self, NodeError> {
@@ -148,10 +148,11 @@ impl RendererModules {
         )
     }
     pub fn start_with_options(
-        config: NodeConfig,
+        config: impl Into<ModuleConfig>,
         base_url: &str,
         options: RendererNodeOptions,
     ) -> Result<Self, NodeError> {
+        let config = config.into();
         let bindings = worker_bindings(&options.worker_modules)?;
         if config.timeout > Duration::from_secs(5) {
             return Err(NodeError::Configuration(
@@ -180,7 +181,7 @@ impl RendererModules {
             .filter(|token| token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .ok_or_else(|| NodeError::Protocol("invalid renderer capability".into()))?
             .to_owned();
-        let options = json!({"base":base_url,"token":token,"preload":metadata["preload"],"node":metadata["node"],"buffer":metadata["buffer"],"exposeNodeGlobals":options.globals == NodeGlobals::Page,"workerModules":bindings});
+        let options = json!({"base":base_url,"token":token,"preload":metadata["preload"],"hasPreload":metadata["hasPreload"],"node":metadata["node"],"buffer":metadata["buffer"],"exposeNodeGlobals":options.globals == NodeGlobals::Page,"workerModules":bindings});
         Ok(Self {
             node,
             origin,
@@ -266,11 +267,14 @@ fn module_reply(
 }
 
 impl RendererBridge {
-    pub fn start(config: NodeConfig, entry: impl AsRef<Path>) -> Result<Self, NodeError> {
+    pub fn start(
+        config: impl Into<ModuleConfig>,
+        entry: impl AsRef<Path>,
+    ) -> Result<Self, NodeError> {
         Self::start_with_globals(config, entry, NodeGlobals::Page)
     }
     pub fn start_with_globals(
-        config: NodeConfig,
+        config: impl Into<ModuleConfig>,
         entry: impl AsRef<Path>,
         globals: NodeGlobals,
     ) -> Result<Self, NodeError> {
@@ -284,10 +288,11 @@ impl RendererBridge {
         )
     }
     pub fn start_with_options(
-        config: NodeConfig,
+        config: impl Into<ModuleConfig>,
         entry: impl AsRef<Path>,
         options: RendererNodeOptions,
     ) -> Result<Self, NodeError> {
+        let config = config.into();
         let bindings = worker_bindings(&options.worker_modules)?;
         // Sync browser calls must have a short, explicit worker deadline.
         if config.timeout > Duration::from_secs(5) {
@@ -320,7 +325,7 @@ impl RendererBridge {
             "{origin}{prefix}{}",
             relative.to_string_lossy().replace('\\', "/")
         );
-        let options = json!({"base": format!("{origin}{prefix}"), "token":token,"preload":metadata["preload"],"node":metadata["node"],"buffer":metadata["buffer"],"exposeNodeGlobals":options.globals == NodeGlobals::Page,"workerModules":bindings});
+        let options = json!({"base": format!("{origin}{prefix}"), "token":token,"preload":metadata["preload"],"hasPreload":metadata["hasPreload"],"node":metadata["node"],"buffer":metadata["buffer"],"exposeNodeGlobals":options.globals == NodeGlobals::Page,"workerModules":bindings});
         let script = renderer_script(&options);
         let service = Arc::new(Service {
             root,
@@ -426,12 +431,41 @@ impl Drop for RendererBridge {
 }
 
 fn response(stream: &mut TcpStream, status: u16, mime: &str, body: &[u8]) -> std::io::Result<()> {
-    write!(stream, "HTTP/1.1 {status} Response\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'\r\n\r\n", body.len())?;
+    response_connection(stream, status, mime, body, false)
+}
+
+fn response_connection(
+    stream: &mut TcpStream,
+    status: u16,
+    mime: &str,
+    body: &[u8],
+    reuse: bool,
+) -> std::io::Result<()> {
+    let connection = if reuse { "keep-alive" } else { "close" };
+    write!(stream, "HTTP/1.1 {status} Response\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: {connection}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'\r\n\r\n", body.len())?;
     stream.write_all(body)
 }
 
 impl Service {
     fn serve(&self, stream: &mut TcpStream) -> std::io::Result<()> {
+        // Only an authenticated Node endpoint may reuse a connection. Bound
+        // both the request count and idle wait; assets/errors always close.
+        for index in 0..512 {
+            let mut reuse = false;
+            self.serve_request(stream, index, &mut reuse)?;
+            if !reuse {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn serve_request(
+        &self,
+        stream: &mut TcpStream,
+        index: usize,
+        reuse: &mut bool,
+    ) -> std::io::Result<()> {
         stream.set_read_timeout(Some(Duration::from_secs(3)))?;
         stream.set_write_timeout(Some(Duration::from_secs(3)))?;
         let mut bytes = Vec::new();
@@ -444,7 +478,24 @@ impl Service {
             if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
                 break end + 4;
             }
-            let read = bounded_read(stream, &mut chunk, deadline)?;
+            let first_deadline = if index > 0 && bytes.is_empty() {
+                Instant::now() + Duration::from_millis(250)
+            } else {
+                deadline
+            };
+            let read = match bounded_read(stream, &mut chunk, first_deadline) {
+                Err(error)
+                    if index > 0
+                        && bytes.is_empty()
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                        ) =>
+                {
+                    return Ok(())
+                }
+                result => result?,
+            };
             if read == 0 {
                 return Ok(());
             }
@@ -534,12 +585,20 @@ impl Service {
                     .unwrap_or_default(),
                 request,
             );
-            return response(
+            let keep_alive = status == 200
+                && index < 511
+                && !headers
+                    .get("connection")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("close"));
+            response_connection(
                 stream,
                 status,
                 "application/json",
                 &serde_json::to_vec(&body)?,
-            );
+                keep_alive,
+            )?;
+            *reuse = keep_alive;
+            return Ok(());
         }
         if method != "GET" {
             return response(
@@ -633,6 +692,7 @@ fn decode_path(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::decode_path;
+    use crate::NodeConfig;
     #[test]
     fn encoded_asset_paths_do_not_create_windows_namespaces() {
         assert_eq!(
