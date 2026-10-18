@@ -252,7 +252,7 @@ mod windows {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use objc::{msg_send, runtime::Object, sel};
+    use objc::{msg_send, runtime::Object, sel, sel_impl};
     use tao::platform::macos::WindowExtMacOS;
     use tao::window::Window;
 
