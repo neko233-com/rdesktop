@@ -98,7 +98,7 @@ WinSock accepted sockets explicitly return to blocking mode before bounded reads
 a split-header regression reproduces the former inherited-FIONBIO failure.
 
 Current bounds: 4 MiB RPC frames, 16 MiB assets, 1 MiB CommonJS sources, 4096 Node
-references, 256 renderer callbacks and 256 queued events; renderer worker calls
+references, 256 simultaneously retained renderer callbacks and 256 queued events; renderer worker calls
 must use deadlines of at most five seconds. HTTP headers/body have a five-second
 total read deadline. Node references use browser GC release hints, callbacks and
 Promises return through a scoped event queue, and errors preserve name/code.
@@ -275,14 +275,49 @@ This is an example measurement, not an iHub installer size or Authenticode claim
 The workspace lock adds only the local example package; no new external resolved
 dependency, Node binary or second browser was added to the default CLI payload.
 
+### Callback lifetime and bounded worker bootstrap
+
+The renderer retains a callback closure while the selected Node worker still
+holds its function. The worker uses weak callback records and bounded retirement
+metadata, repeated until acknowledged. Every registration has a document-local
+generation, so a delayed retirement cannot remove a newly reused function.
+EventEmitter callbacks preserve their receiver and round-trip function identity;
+`off`, `once` and reuse after retirement do not require a different API. A callback
+packed into an incomplete/rejected call is reconciled on the next ordinary poll.
+Copy-only Buffer operations neither consume nor acknowledge callback retirements.
+
+Module workers capture Node's GC function privately with `--expose-gc`, reset the
+global value to `undefined`, and collect under callback pressure or once after
+an idle activity period. Persistent listeners remain alive; collection is not a
+fixed timer. Worker startup flags are removed from `process.execArgv` so an
+ordinary `child_process.fork` does not inherit the internal bootstrap. This is
+not a sandbox; preloads and native modules retain full Node authority.
+
+The worker source currently exceeds Windows' command-line character limit. A
+small `--eval` bootstrap reads a length-prefixed, at-most-256-KiB source from the
+private stdin pipe, leaving the first JSON request intact. The existing writer
+thread sends both source and load request within the normal startup deadline;
+no source file, additional runtime or dependency is installed.
+
+`scripts/verify-node-callback-native.mjs OUTSIDE_OUTPUT [--headless]` compares an
+independent Node reference with the real WebView2 document. Visible acceptance
+invokes the Windows UIA button and captures the native surface. Both modes pass
+600 sequential file-read callbacks, retained listener/receiver/identity checks,
+256 live-listener capacity enforcement, removal and function reuse, recovery
+after 320 incomplete calls, and zero idle event requests after retirement.
+The host exits normally and the owned Node PID is absent afterwards; that does
+not independently establish its exit code or whether the host used a fallback.
+Worker integration tests additionally cover lost retirement replies, stale
+acknowledgements, copy-only retries and real fork IPC.
+
 ## Remaining integration gates
 
 The direct worker mode has no DOM. The renderer mode is experimental: it does
 not yet replace iHub's Electron runtime or ship a production Node executable.
 Native addon acceptance is currently limited to the measured distribution above.
 ESM, arbitrary synchronous return
-values from callbacks into Node, full Buffer/prototype semantics, complete
-callback disposal and application-owned subprocess lifecycle remain incomplete.
+values from callbacks into Node, full Buffer/prototype semantics, cross-heap
+cycle collection and application-owned subprocess lifecycle remain incomplete.
 Loading a native addon is delegated to the selected Node ABI and has not been
 accepted as universal addon compatibility. Electron API adapters, uTools host
 lifecycle, native dialogs, drag/drop/file paths and detach/adopt are still gates.
@@ -312,9 +347,10 @@ own fetch replacement cannot intercept private callbacks or Promise delivery;
 the native fixture tests this explicitly. Visible memory acceptance invokes the
 actual Windows UIA button; hidden acceptance executes in the same native engine.
 The poll timer is created only for registered callbacks, pending Promises or
-released references, and stops when none remain. A synchronous-only plugin does
+released references or retirement acknowledgements, and stops when none remain. A synchronous-only plugin does
 not issue idle event polls; native acceptance counts those requests before its
-first asynchronous operation. Complete callback retirement remains a gate.
+first asynchronous operation. Cross-heap cycles involving Node references still
+depend on browser GC release hints and remain a compatibility gate.
 Each next poll is scheduled after the previous reply, leaving a real delay even
 when transport is slow. Native acceptance injects 60 ms of synchronous transport
 latency and verifies that successive polls still leave time for other work.

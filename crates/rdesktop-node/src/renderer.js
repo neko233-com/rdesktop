@@ -3,10 +3,11 @@ function rdesktopNodeRenderer(options) {
   if (window.top !== window || !location.href.startsWith(options.base)) return;
   const documentIdentity = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
   const references = new WeakMap(), proxies = new Map(), callbacks = new Map(), callbackIds = new WeakMap();
+  const callbackAcks = new Map();
   const promises = new Map(), released = new Set(), retained = new Map(), modules = new Map();
   let nodeProcess, nodeSetImmediate, nodeClearImmediate, memory;
   const startTimer = window.setTimeout.bind(window), stopTimer = window.clearTimeout.bind(window);
-  let sequence = 0, closed = false, polling = false, terminalError = null, timer = null;
+  let sequence = 0, callbackEpoch = 0, closed = false, polling = false, terminalError = null, timer = null;
   const finalizer = new FinalizationRegistry(({ id, key }) => {
     if (!proxies.get(key)?.deref()) proxies.delete(key);
     const count = (retained.get(id) || 1) - 1;
@@ -18,13 +19,19 @@ function rdesktopNodeRenderer(options) {
   function report(cause) { console.error('rdesktop Node renderer:', cause); window.dispatchEvent(new CustomEvent('rdesktop-node-error', { detail: { name: cause.name, message: cause.message } })); }
   function events(items) {
     for (const event of items || []) {
-      if (event.kind === 'callback') { const callback = callbacks.get(event.id); if (callback) queueMicrotask(() => { try { callback(...event.args.map(unpack)); } catch (cause) { report(cause); } }); }
+      if (event.kind === 'callback') { const callback = callbacks.get(event.id)?.fn; if (callback) queueMicrotask(() => { try { callback.apply(unpack(event.receiver), event.args.map(unpack)); } catch (cause) { report(cause); } }); }
       if (event.kind === 'promise') { const pending = promises.get(event.id); if (pending) { promises.delete(event.id); event.success ? pending.resolve(unpack(event.value)) : pending.reject(error(event.error)); } }
     }
+  }
+  function retireCallbacks(items = []) {
+    for (const { id, epoch } of items) { if (callbacks.get(id)?.epoch === epoch) callbacks.delete(id); callbackAcks.set(id, epoch); }
+    if (callbackAcks.size) ensureEvents();
   }
   function rpc(request) {
     if (closed) throw terminalError || new Error('The renderer Node lease is closed.');
     request = { ...request, rendererMemory: true };
+    if (request.operation !== 'buffer' && callbackAcks.size) request.callbackAcks = [...callbackAcks].map(([id, epoch]) => ({ id, epoch }));
+    if (!['buffer', 'collect-callbacks'].includes(request.operation) && callbacks.size) request.callbackClaims = [...callbacks].map(([id, entry]) => ({ id, epoch: entry.epoch }));
     if (memory && request.operation !== 'buffer') request.memory = memory.prepare(request);
     const end = Date.now() + 500;
     let replayedBuffer = false;
@@ -45,6 +52,8 @@ function rdesktopNodeRenderer(options) {
       if (!result.success) { if (result.error?.code === 'RDESKTOP_NODE_BUSY' && Date.now() < end) continue; throw error(result.error); }
       memory?.accept(request.memory, result.data);
       events(result.data.events);
+      for (const { id, epoch } of request.callbackAcks || []) if (callbackAcks.get(id) === epoch) callbackAcks.delete(id);
+      retireCallbacks(result.data.callbackRetirements);
       if (result.data.thrown) throw error(result.data.thrown);
       return result.data;
     }
@@ -57,8 +66,14 @@ function rdesktopNodeRenderer(options) {
     if (references.has(value)) return { $rdesktop: 'reference', id: references.get(value) };
     if (typeof value === 'function') {
       let id = callbackIds.get(value);
-      if (!id) { if (callbacks.size >= 256) throw new RangeError('Renderer callback limit reached.'); id = String(++sequence); callbackIds.set(value, id); callbacks.set(id, value); ensureEvents(); }
-      return { $rdesktop: 'callback', id };
+      if (!id || !callbacks.has(id)) {
+        if (callbacks.size >= 256) rpc({ operation: 'collect-callbacks' });
+        if (callbacks.size >= 256) throw new RangeError('Renderer callback limit reached.');
+        if (!id) { id = String(++sequence); callbackIds.set(value, id); }
+        callbacks.set(id, { fn: value, epoch: 0 }); ensureEvents();
+      }
+      const entry = callbacks.get(id); entry.epoch = ++callbackEpoch;
+      return { $rdesktop: 'callback', id, epoch: entry.epoch };
     }
     if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return memory.tag(value);
     if (seen.has(value) || seen.size > 32) throw new TypeError('Cyclic or excessively nested renderer values are unsupported.');
@@ -79,6 +94,7 @@ function rdesktopNodeRenderer(options) {
     if (value.$rdesktop === 'bytes') return bufferFacade.decode(value.base64);
     if (value.$rdesktop === 'memory-view' || value.$rdesktop === 'binary-view') return memory.unpack(value);
     if (value.$rdesktop === 'error') return error(value);
+    if (value.$rdesktop === 'callback-reference') { const callback = callbacks.get(value.id)?.fn; if (!callback) throw new ReferenceError('Node returned a retired renderer callback.'); return callback; }
     if (value.$rdesktop !== 'reference') throw new TypeError('Invalid Node value tag.');
     if (value.kind === 'promise') {
       const old = proxies.get(value.id)?.deref(); if (old) return old;
@@ -179,14 +195,14 @@ function rdesktopNodeRenderer(options) {
       // Serialize event reads with calls in this document. An outstanding async
       // fetch/XHR can be starved by a run of synchronous CommonJS requests in a
       // native child. The existing bounded RPC applies memory before callbacks.
-      if (callbacks.size || promises.size) rpc({ operation: 'events' });
+      if (callbacks.size || promises.size || callbackAcks.size) rpc({ operation: 'events' });
     } catch (cause) { if (!closed) { closed = true; terminalError = cause; for (const pending of promises.values()) pending.reject(cause); promises.clear(); report(cause); } }
     // Start the delay after the previous bounded call returns. A fixed interval
     // can already be overdue after a slow synchronous request and monopolize a
     // native child's event loop. Leave time for painting, input and CDP work.
-    finally { polling = false; if (!closed && (callbacks.size || promises.size || released.size)) ensureEvents(); }
+    finally { polling = false; if (!closed && (callbacks.size || promises.size || released.size || callbackAcks.size)) ensureEvents(); }
   }
-  window.addEventListener('pagehide', () => { closed = true; stopTimer(timer); timer = null; for (const pending of promises.values()) pending.reject(new Error('Renderer closed.')); promises.clear(); callbacks.clear(); }, { once: true });
+  window.addEventListener('pagehide', () => { closed = true; stopTimer(timer); timer = null; for (const pending of promises.values()) pending.reject(new Error('Renderer closed.')); promises.clear(); callbacks.clear(); callbackAcks.clear(); }, { once: true });
   try { installWorkerBindings(); load(rpc({ operation: 'preload' })); }
   catch (cause) { report(cause); throw cause; }
 }

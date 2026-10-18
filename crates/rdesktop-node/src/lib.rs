@@ -21,6 +21,9 @@ const MAX_TIMEOUT: Duration = Duration::from_secs(120);
 const WORKER: &str = include_str!("worker.cjs");
 const MODULES: &str = include_str!("modules.cjs");
 const MEMORY: &str = include_str!("memory.cjs");
+const CALLBACKS: &str = include_str!("callbacks.cjs");
+const BOOTSTRAP: &str = include_str!("bootstrap.cjs");
+const MAX_BOOTSTRAP_BYTES: usize = 256 * 1024;
 pub mod renderer;
 
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +79,7 @@ pub struct NodeRuntime {
 
 struct Worker {
     child: Child,
+    bootstrap: Option<Vec<u8>>,
     requests: Option<mpsc::SyncSender<Vec<u8>>>,
     responses: mpsc::Receiver<std::result::Result<Value, String>>,
     sequence: u64,
@@ -169,9 +173,17 @@ impl NodeRuntime {
         }
         let (executable, verified_file) = verified_executable(&config)?;
         let mut command = Command::new(executable);
-        let source = format!("\"use strict\";\n{MEMORY}\n{MODULES}\n{WORKER}");
+        let source = format!("\"use strict\";\nconst rdesktopCollectGarbage = globalThis.gc; if (rdesktopCollectGarbage) globalThis.gc = undefined; process.execArgv = [];\n{MEMORY}\n{CALLBACKS}\n{MODULES}\n{WORKER}");
+        if source.len() > MAX_BOOTSTRAP_BYTES {
+            return Err(NodeError::Configuration(
+                "Node worker bootstrap exceeds its limit".into(),
+            ));
+        }
+        if module_mode {
+            command.arg("--expose-gc");
+        }
         command
-            .args(["--input-type=commonjs", "--eval", &source])
+            .args(["--input-type=commonjs", "--eval", BOOTSTRAP])
             .env_remove("NODE_OPTIONS")
             .env_remove("NODE_PATH")
             .env_remove("ELECTRON_RUN_AS_NODE")
@@ -256,6 +268,7 @@ impl NodeRuntime {
         }
         let mut worker = Worker {
             child,
+            bootstrap: Some(source.into_bytes()),
             requests: Some(requests),
             responses,
             sequence: 0,
@@ -364,6 +377,13 @@ impl Worker {
             ));
         }
         bytes.push(b'\n');
+        if let Some(source) = self.bootstrap.take() {
+            let mut packet = Vec::with_capacity(4 + source.len() + bytes.len());
+            packet.extend_from_slice(&(source.len() as u32).to_le_bytes());
+            packet.extend_from_slice(&source);
+            packet.extend_from_slice(&bytes);
+            bytes = packet;
+        }
         if self
             .requests
             .as_ref()

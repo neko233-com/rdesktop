@@ -2,9 +2,10 @@
 function createModuleRuntime(root, preload) {
   const fs = require('node:fs'), path = require('node:path'), Module = require('node:module');
   const nativeTypes = require('node:util').types;
-  const references = new Map(), identities = new WeakMap(), callbacks = new Map();
+  const references = new Map(), identities = new WeakMap();
   const events = [];
   const memory = createNodeMemory();
+  const callbacks = createNodeCallbacks(pack, queue, rdesktopCollectGarbage);
   let sequence = 0, overflow = false;
   const maxReferences = 4096, maxEvents = 256;
   function queue(event) {
@@ -38,6 +39,7 @@ function createModuleRuntime(root, preload) {
       return { $rdesktop: 'binary-view', type, base64: bytes.toString('base64'), length: array || type === 'DataView' ? value.byteLength : value.length };
     }
     if (value instanceof Error) return { $rdesktop: 'error', ...diagnostic(value) };
+    if (typeof value === 'function') { const callback = callbacks.tag(value); if (callback) return callback; }
     if (Array.isArray(value)) {
       if (seen.has(value)) return reference(value, receiver);
       seen.add(value); try { return value.map(item => pack(item, depth + 1, seen)); } finally { seen.delete(value); }
@@ -58,14 +60,7 @@ function createModuleRuntime(root, preload) {
       case 'bytes': return Buffer.from(value.base64, 'base64');
       case 'memory-view': return memory.unpack(value);
       case 'reference': return get(value.id);
-      case 'callback': {
-        if (typeof value.id !== 'string' || value.id.length > 64) throw new TypeError('Invalid renderer callback.');
-        if (!callbacks.has(value.id)) {
-          if (callbacks.size >= 256) throw new RangeError('Renderer callback limit reached.');
-          callbacks.set(value.id, (...args) => { queue({ kind: 'callback', id: value.id, args: args.map(arg => pack(arg)) }); });
-        }
-        return callbacks.get(value.id);
-      }
+      case 'callback': return callbacks.unpack(value);
       case 'object': {
         if (!Array.isArray(value.entries) || value.entries.length > 4096) throw new TypeError('Invalid renderer object.');
         const result = Object.create(null);
@@ -190,21 +185,29 @@ function createModuleRuntime(root, preload) {
         for (const id of message.ids) { references.delete(id); references.delete('promise:' + id); } value = null; break;
       }
       case 'events': value = null; break;
+      case 'collect-callbacks': callbacks.collect(true); value = null; break;
       default: throw new TypeError('Unknown module operation.');
     }
     if (overflow) throw new RangeError('Renderer event queue overflowed; close this runtime.');
     return { value, events: events.splice(0) };
   }
   return { request(message) {
-    if (!message?.rendererMemory || message.operation === 'buffer') return execute(message);
+    // Copy-only retries must neither consume events nor change callback leases.
+    if (message?.operation === 'buffer') return execute(message);
+    callbacks.acknowledge(message?.callbackAcks);
+    const reconcile = callbacks.claims(message?.callbackClaims);
+    callbacks.collect();
+    if (!['events', 'collect-callbacks'].includes(message?.operation)) callbacks.touch();
+    if (!message?.rendererMemory) { const result = execute(message); reconcile(); return { ...result, callbackRetirements: callbacks.retirements() }; }
     // Keep input views alive throughout the operation, including typed errors.
     // Native objects and pending callbacks retain their own views afterwards;
     // weak backing registries do not turn every call into a permanent copy.
     let retained, result;
     try { retained = memory.load(message.memory); result = execute(message); }
     catch (error) { result = { thrown: diagnostic(error), events: events.splice(0) }; }
+    reconcile();
     try {
-      const changes = memory.collect(false), response = { ...result, memory: changes }; void retained;
+      const changes = memory.collect(false), response = { ...result, memory: changes, callbackRetirements: callbacks.retirements() }; void retained;
       // The worker adds its own envelope. Do not acknowledge changed bytes before
       // knowing that this entire reply fits its frame, including returned views.
       if (Buffer.byteLength(JSON.stringify(response)) > 4 * 1024 * 1024 - 1024) throw new RangeError('Node memory response exceeds its frame limit.');

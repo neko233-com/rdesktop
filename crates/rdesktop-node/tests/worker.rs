@@ -82,6 +82,30 @@ process.on('exit',code=>fs.writeFileSync('normal-exit.txt',String(code)));
 
 #[test]
 #[ignore = "requires an explicitly pinned local Node executable"]
+fn fork_ipc_does_not_inherit_internal_worker_bootstrap_arguments() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("child.cjs"),
+        "process.send({flags:process.execArgv,args:process.argv.slice(2)});process.disconnect();",
+    )
+    .unwrap();
+    fs::write(root.path().join("preload.cjs"), r#"
+window.fork=()=>new Promise((resolve,reject)=>{
+  const child=require('node:child_process').fork(require('node:path').join(__dirname,'child.cjs'),['owned argument'],{stdio:['ignore','ignore','ignore','ipc']});
+  let message;child.on('message',value=>message=value);child.on('error',reject);
+  child.on('exit',code=>code===0?resolve({message,code,flags:process.execArgv}):reject(Error('Child failed: '+code)));
+});
+"#).unwrap();
+    let worker = NodeRuntime::start(config(&root)).unwrap();
+    assert_eq!(
+        worker.call("fork", &[]).unwrap(),
+        json!({"$rdesktop":"object","entries":[["message",{"$rdesktop":"object","entries":[["flags",[]],["args",["owned argument"]]]}],["code",0],["flags",[]]]})
+    );
+    worker.close().unwrap();
+}
+
+#[test]
+#[ignore = "requires an explicitly pinned local Node executable"]
 fn typed_preload_errors_do_not_poison_the_next_call() {
     let (_root, worker)=runtime("window.fail=()=>{const e=new TypeError('expected failure');e.code='OWNED_FIXTURE';throw e;};window.ok=()=>42;");
     match worker.call("fail", &[]) {

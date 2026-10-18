@@ -144,6 +144,63 @@ fn real_async_callbacks_and_promises_use_the_scoped_event_queue() {
 
 #[test]
 #[ignore = "requires an explicitly pinned local Node executable"]
+fn callback_retirements_survive_lost_replies_copy_retries_and_stale_acknowledgements() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("preload.cjs"), "").unwrap();
+    let node = NodeRuntime::start_modules(config(root.path())).unwrap();
+    let vm = node.module_request(json!({"operation":"resolve","name":"node:vm","parent":root.path().join("preload.cjs")})).unwrap()["value"].clone();
+    let hold = call(
+        &node,
+        &get(&node, &vm, "runInNewContext"),
+        json!(["(callback,keep)=>{globalThis.held=keep?callback:null;return callback;}"]),
+    )
+    .unwrap()["value"]
+        .clone();
+    let callback = |epoch| json!({"$rdesktop":"callback","id":"reused","epoch":epoch});
+    let retirement = |epoch| json!([{"id":"reused","epoch":epoch}]);
+    let old = call(&node, &hold, json!([callback(1), false])).unwrap();
+    assert_eq!(
+        old["value"],
+        json!({"$rdesktop":"callback-reference","id":"reused"})
+    );
+    let collected = node
+        .module_request(json!({"operation":"collect-callbacks"}))
+        .unwrap();
+    assert_eq!(collected["callbackRetirements"], retirement(1));
+    // A reply can disappear after the operation ran. Repeat metadata until an
+    // ordinary transport acknowledgement, without replaying that operation.
+    assert_eq!(
+        node.module_request(json!({"operation":"events"})).unwrap()["callbackRetirements"],
+        retirement(1)
+    );
+    let live = call(&node, &hold, json!([callback(2), true])).unwrap();
+    assert_eq!(live["callbackRetirements"], retirement(1));
+    node.module_request(json!({"operation":"events","callbackAcks":retirement(1)}))
+        .unwrap();
+    let same = call(&node, &hold, json!([callback(3), false])).unwrap();
+    assert_eq!(same["value"]["$rdesktop"], "callback-reference");
+    assert_eq!(
+        node.module_request(json!({"operation":"collect-callbacks"}))
+            .unwrap()["callbackRetirements"],
+        retirement(3)
+    );
+    let buffer = node.module_request(json!({"operation":"buffer","kind":"static","name":"byteLength","args":["copy only"],"backings":[],"callbackAcks":retirement(3)})).unwrap();
+    assert!(buffer.get("callbackRetirements").is_none());
+    assert_eq!(
+        node.module_request(json!({"operation":"events","callbackAcks":retirement(1)}))
+            .unwrap()["callbackRetirements"],
+        retirement(3)
+    );
+    assert_eq!(
+        node.module_request(json!({"operation":"events","callbackAcks":retirement(3)}))
+            .unwrap()["callbackRetirements"],
+        json!([])
+    );
+    node.close().unwrap();
+}
+
+#[test]
+#[ignore = "requires an explicitly pinned local Node executable"]
 fn renderer_memory_preserves_native_aliases_errors_and_bounds() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("preload.cjs"), "").unwrap();
