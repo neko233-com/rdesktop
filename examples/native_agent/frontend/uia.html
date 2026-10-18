@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Native UIA action fixture</title>
+<style>body{font:16px system-ui;color:#182138;background:#f3f5f8;margin:0;padding:24px}main{max-width:700px;margin:auto}section{background:white;border:1px solid #aab6c6;border-radius:8px;padding:16px;margin:16px 0}label{display:block;margin:8px 0}input,button,select,textarea{font:inherit;padding:8px}button{color:white;background:#194c9e;border:1px solid #123b80;border-radius:4px}button:disabled{background:#ddd;color:#444}:focus-visible{outline:3px solid #19263d;outline-offset:3px}#scroll-box{height:100px;overflow:auto;border:1px solid #8995a9;padding:10px}#scroll-content{height:500px;display:flex;flex-direction:column;justify-content:space-between}input:not([type]),input[type=password],textarea{max-width:100%;width:90%}</style></head>
+<body><main><h1>Native UIA actions</h1>
+<section aria-label="Editable controls">
+<label for="display-name">Display name</label><input id="display-name" value="Initial value">
+<label for="readonly">Read-only sample</label><input id="readonly" value="Fixed value" readonly>
+<label for="secret">Example password</label><input id="secret" type="password" value="owned-uia-secret">
+<label><input id="notifications" type="checkbox"> Receive notifications</label>
+<label for="volume">Volume</label><input id="volume" type="range" min="0" max="100" value="50">
+<fieldset><legend>Storage</legend><label><input id="local" type="radio" name="storage" checked> Local storage</label><label><input id="remote" type="radio" name="storage"> Remote storage</label></fieldset>
+<label for="multi">Multiple choices</label><select id="multi" multiple size="3"><option>Apple</option><option>Banana</option><option>Cherry</option></select>
+<label for="notes">Notes</label><textarea id="notes">Accessible multiline text.</textarea>
+<button id="save">Save preferences</button><button id="disabled" disabled>Unavailable action</button><button id="aria-disabled" aria-disabled="true">Unavailable custom action</button>
+<p id="status" role="status" aria-live="polite">No changes saved</p></section>
+<section aria-label="Pattern and identity tests"><button id="disclosure" aria-expanded="false" aria-controls="details">Show details</button><div id="details" hidden>Expanded details content</div>
+<button id="duplicate-a">Duplicate action</button><button id="duplicate-b">Duplicate action</button>
+<button id="unicode-action">Unicode action 中文 🧪</button>
+<div id="scroll-box" role="group" aria-label="Scrollable sample" tabindex="0"><div id="scroll-content"><span>Start of scrollable content</span><button id="scroll-end">Scroll target</button></div></div>
+</section></main>
+<script>
+window.fixture={saves:0,duplicateA:0,duplicateB:0,scrollCalls:0,unicodeCalls:0};
+document.querySelector('#save').onclick=()=>{fixture.saves++;document.querySelector('#status').textContent='Preferences saved locally';};
+document.querySelector('#duplicate-a').onclick=()=>fixture.duplicateA++;
+document.querySelector('#duplicate-b').onclick=()=>fixture.duplicateB++;
+document.querySelector('#unicode-action').onclick=()=>fixture.unicodeCalls++;
+document.querySelector('#scroll-end').onclick=()=>fixture.scrollCalls++;
+document.querySelector('#disclosure').onclick=()=>{const button=document.querySelector('#disclosure');const expanded=button.getAttribute('aria-expanded')!=='true';button.setAttribute('aria-expanded',String(expanded));document.querySelector('#details').hidden=!expanded;};
+</script></body></html>

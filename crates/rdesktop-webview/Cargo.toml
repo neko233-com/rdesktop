@@ -22,7 +22,7 @@ percent-encoding = "2"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = { version = "0.38", optional = true }
-windows = { version = "0.61", optional = true, features = ["Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Ole"] }
+windows = { version = "0.61", optional = true, features = ["Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
 rdesktop-dev = { workspace = true, optional = true }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
 

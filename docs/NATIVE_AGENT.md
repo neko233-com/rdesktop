@@ -18,6 +18,7 @@ The CLI prints the discovery **file path**, never its token. In another terminal
 
 ```powershell
 rdesktop agent --session .rdesktop/agent-cli-1234.json windows
+rdesktop agent --session .rdesktop/agent-cli-1234.json info
 rdesktop agent --session .rdesktop/agent-cli-1234.json dom --window 1
 rdesktop agent --session .rdesktop/agent-cli-1234.json elements --window 1
 rdesktop agent --session .rdesktop/agent-cli-1234.json accessibility --window 1
@@ -82,7 +83,7 @@ Read commands also support GET with `window` and `selector` query parameters.
 | `elements` | `selector`; bounded elements with bounds, font/colors, labels, visibility and values |
 | `state` | Viewport, focused markup and the app's optional `window.__RDESKTOP_AGENT_STATE__` |
 | `accessibility` | Entire WebView2 Accessibility domain: full/partial/root/ancestor/child/query trees, enable and disable; `method` and `params` |
-| `uia` | Windows UI Automation raw/control/content tree rooted at the selected native window, names, roles, focus, bounds, help/ARIA properties, values and standard pattern IDs |
+| `uia` | Windows UI Automation raw/control/content tree, provider runtime IDs, targeted inspection/text and real typed pattern operations within the selected native window |
 | `audit` | Run locally loaded axe-core; returns violations, passes, incomplete and inapplicable rules, plus manual-review flag |
 | `evaluate` | `expression`; awaits a Promise and returns its JSON value; exceptions fail the request |
 | `action` | `action`, `selector`, `value`, `target_selector`, `delta_x`, `delta_y` as appropriate |
@@ -139,13 +140,85 @@ UIA reports up to 1,000 nodes by default (maximum 5,000), 64 levels (maximum
 128) and a five-second traversal budget. It probes standard pattern IDs
 10000..10034, reports truncation, and redacts password values. `patterns:false`
 can skip probing; `view` chooses raw/control/content. No UIA request starts at
-the desktop root or visits another application's windows. Snapshot node IDs
-are not persistent action identifiers.
+the desktop root or visits another application's windows. Snapshot `id` values
+are local row numbers and are rejected as action targets. Opaque `runtime_id`
+arrays identify current provider controls; they are not valid after removal.
+Windows may reuse those IDs over time; take fresh observations and do not use
+them as persistent identities. Their format is treated as opaque, as specified
+by [Microsoft's runtime ID contract](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationclient/nf-uiautomationclient-iuiautomationelement-getruntimeid).
 
 The UIA root's current process ID and native handle must match the selected
 owned window before descendants are traversed. Values are returned only when
 UIA explicitly identifies a control as non-password; an unknown password
 property is redacted too.
+
+### Native UIA operations
+
+Use POST (the CLI does this automatically) and an exact `target`. Criteria can
+include `name`, numeric UIA `control_type`, `automation_id`, `class_name` and/or
+the `runtime_id` array returned by a snapshot. Criteria are combined with AND.
+Every request searches the current selected window again. Ambiguous, missing,
+truncated and stale-window searches fail before performing an action. No raw
+HWND or snapshot row number is accepted as a target. `info` advertises the
+backend's operations and scope under `capabilities.uia`.
+An exact live runtime ID resolves as soon as it is found; name/property searches
+must finish within the limits to prove uniqueness. This lets a known control
+remain actionable when the rest of a large document exceeds the snapshot cap.
+
+```json
+{"window":"1","operation":"invoke","target":{"name":"Save preferences","control_type":50000}}
+```
+
+Save the object as `uia-action.json`, then call:
+
+```powershell
+rdesktop agent --session .rdesktop/agent-cli-PID.json uia --params-file uia-action.json
+```
+
+| Operation | Additional parameters / native pattern |
+| --- | --- |
+| `snapshot` | Default operation; `view`, `patterns`, `max_nodes`, `max_depth` |
+| `inspect` | Provider Value/read-only, Toggle, ExpandCollapse, SelectionItem, RangeValue, Scroll, Selection, Transform and Window states |
+| `text`, `text-selection` | Text pattern; `max_chars` 1..65536 (default 4096); up to 32 selected ranges |
+| `focus` | Native `SetFocus`; requires an enabled, visible, keyboard-focusable control |
+| `invoke` | Invoke pattern |
+| `set-value` | String `value`, up to 65536 UTF-8 bytes, no NUL; Value pattern |
+| `set-range-value` | Finite numeric `value` within the provider's writable range |
+| `toggle`, `expand`, `collapse` | Toggle / ExpandCollapse patterns |
+| `select`, `add-to-selection`, `remove-from-selection` | SelectionItem pattern |
+| `scroll` | `horizontal_amount` / `vertical_amount`: `none`, `small-decrement`, `large-decrement`, `small-increment`, `large-increment` |
+| `set-scroll-percent` | `horizontal_percent` / `vertical_percent`: -1 (unchanged) or 0..100 |
+| `scroll-into-view` | ScrollItem pattern; can also reveal disabled controls |
+| `realize` | VirtualizedItem pattern; provider availability determines support |
+| `legacy-default-action` | LegacyIAccessible `DoDefaultAction` |
+| `multiple-view-set` | Signed 32-bit `value`; MultipleView pattern |
+| `window-state` | `state`: `normal`, `minimized`, `maximized`; Window pattern |
+| `window-close` | Normal Window pattern close, including normal application prompts |
+| `move`, `resize`, `rotate` | Transform pattern; finite `x`/`y`, positive `width`/`height`, or `degrees`; coordinates follow the native UIA provider |
+| `text-select` | Text pattern `start`/`end`, 0..1000000 UIA character units; end must not precede start |
+
+These call the real Windows COM interfaces. Unsupported/read-only/disabled
+operations fail explicitly; the framework does not synthesize DOM events or
+fall back to CDP clicks. `scroll-into-view` and `realize` may act on disabled or
+not-yet-realized items when their provider allows it. Mutations share the same
+per-window exclusion as structured engine input. The framework window identity
+and UIA root process/handle are revalidated immediately before mutation.
+
+Success means the native provider accepted the operation (`dispatched:true`).
+Application effects and provider accessibility updates can be asynchronous;
+observe the resulting app state. A WebView2 fixture's Scroll pattern reports
+0 percent even after its native `SetScrollPercent(100)` moves the actual region
+to the bottom. Inspection preserves that provider result; verification records
+it separately from the observed viewport change. Methods absent from a
+provider are not reported as successful, and hidden providers are not expanded
+by silently showing the application.
+
+Password and unknown-password values remain redacted in inspection; text and
+text-selection reads are rejected for those controls. Value writes never echo
+their input. Native mutation failures report their HRESULT without copying a
+provider error message that could contain the supplied value. UIA targets do
+not include separate OS dialogs/popups outside the selected registered window;
+those still require separate desktop/ownership verification.
 
 ## What this proves
 
@@ -175,6 +248,7 @@ cargo run -p rdesktop-cli -- dev --path examples/native_agent --port 1438
 node scripts/verify-native-agent.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/native-visible
 npm ci --ignore-scripts
 node scripts/verify-native-accessibility.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/a11y-visible
+node scripts/verify-native-uia-actions.mjs examples/native_agent/.rdesktop/agent-cli-PID.json .cache/uia-visible
 # Repeat with dev --headless and a different artifact directory.
 cargo fmt --all -- --check
 cargo check --workspace --features rdesktop-webview/native-agent
@@ -194,3 +268,10 @@ console events, repeated hot reload with the same PID, and closed-ID rejection.
 It restores the exact frontend bytes after its owned hot-reload test. Artifacts
 and local credentials stay ignored. macOS/Linux native Agent support is not
 claimed by these Windows checks.
+
+The UIA action fixture independently checks real native Value/Toggle/Range,
+single/multiple SelectionItem, Invoke/Legacy, ExpandCollapse, Text selection,
+Scroll, Transform and Window effects. It includes disabled/read-only controls,
+ambiguous and removed targets, password redaction, search limits, cross-window
+rejection and normal auxiliary-window close. Its hidden run records actual
+provider availability and verifies that a request does not show the window.

@@ -539,6 +539,11 @@ impl Backend {
 }
 
 impl NativeAgentBackend for Backend {
+    fn capabilities(&self) -> Value {
+        json!({"uia":{"source":"windows-uia","operations":crate::native_accessibility::OPERATIONS,
+            "scope":"selected registered native window and its descendants", "target_fields":["runtime_id","name","automation_id","control_type","class_name"],
+            "pattern_support":"provider-dependent; unsupported patterns fail without a DOM fallback"}})
+    }
     fn request(&self, command: &str, params: Value) -> Result<Value, String> {
         if command == "exit" {
             self.runtime.exit().map_err(|e| e.to_string())?;
@@ -585,7 +590,15 @@ impl NativeAgentBackend for Backend {
             "uia" => {
                 use tao::platform::windows::WindowExtWindows;
                 let hwnd=self.runtime.with_window(id,|window,_|window.hwnd()).map_err(|e|e.to_string())?;
-                crate::native_accessibility::snapshot(hwnd,&params)
+                let _permit = if crate::native_accessibility::is_mutating(&params) {
+                    let mut busy=self.input_busy.lock().map_err(|_|"input queue poisoned")?;
+                    if !busy.insert(id){return Err("another input action is active for this window".into());}
+                    Some(InputPermit{busy:&self.input_busy,window:id})
+                } else { None };
+                crate::native_accessibility::handle(hwnd,&params,||{
+                    let current=self.runtime.with_window(id,|window,_|window.hwnd()).map_err(|e|e.to_string())?;
+                    if current!=hwnd {Err("native accessibility window was replaced".into())} else {Ok(())}
+                })
             }
             "accessibility" => self.accessibility(id,&params),
             "audit" => self.evaluate(id,&format!(r#"(async()=>{{

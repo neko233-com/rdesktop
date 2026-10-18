@@ -25,6 +25,9 @@ const MAX_RESPONSE: usize = 32 * 1024 * 1024;
 /// The renderer owns window identity, threading, protocol calls and input.
 /// Calls run on bounded HTTP workers, never on the native event-loop thread.
 pub trait NativeAgentBackend: Send + Sync + 'static {
+    fn capabilities(&self) -> Value {
+        json!({})
+    }
     fn request(&self, command: &str, params: Value) -> Result<Value, String>;
 }
 
@@ -208,8 +211,9 @@ async fn info(State(state): State<AgentState>) -> Json<Value> {
     Json(
         json!({"framework": "rdesktop", "version": state.session.version,
         "pid": state.session.pid, "mode": state.session.mode,
-        "commands": ["windows", "dom", "elements", "state", "accessibility", "uia", "audit", "evaluate", "action", "cdp", "events", "screenshot", "window", "reload", "ipc", "recording"],
-        "input": "CDP engine input; OS dialogs/caption/file-drop require desktop verification",
+        "commands": ["windows", "dom", "elements", "state", "accessibility", "uia", "audit", "evaluate", "action", "cdp", "events", "screenshot", "window", "reload", "ipc", "exit", "recording"],
+        "capabilities": state.backend.capabilities(),
+        "input": "CDP engine input and declared owned-window UIA patterns; external OS file-drop requires desktop verification",
         "screenshot": "native WebView content PNG; excludes OS dialogs and title bar"}),
     )
 }
@@ -219,9 +223,28 @@ async fn read(
     RoutePath(command): RoutePath<String>,
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    if command == "uia"
+        && query
+            .get("operation")
+            .is_some_and(|operation| operation != "snapshot")
+    {
+        return failure(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "use POST for targeted UIA operations",
+        );
+    }
     let params = query
         .into_iter()
-        .map(|(key, value)| (key, Value::String(value)))
+        .map(|(key, value)| {
+            let parsed = if command == "uia"
+                && ["max_nodes", "max_depth", "patterns"].contains(&key.as_str())
+            {
+                serde_json::from_str(&value).unwrap_or(Value::String(value))
+            } else {
+                Value::String(value)
+            };
+            (key, parsed)
+        })
         .collect();
     if !matches!(
         command.as_str(),
@@ -476,5 +499,44 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), saved);
         remove_owned_discovery(&path, &session.token);
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn uia_get_cannot_execute_targeted_operations_and_preserves_typed_limits() {
+        for operation in ["invoke", "set-value", "window-close", "inspect", "text"] {
+            let response = router(state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/__rdesktop__/agent/uia?operation={operation}"))
+                        .header("host", "127.0.0.1:1234")
+                        .header("authorization", "Bearer test-secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+        let response = router(state())
+            .oneshot(
+                Request::builder()
+                    .uri("/__rdesktop__/agent/uia?window=7&max_nodes=32&max_depth=4&patterns=false")
+                    .header("host", "127.0.0.1:1234")
+                    .header("authorization", "Bearer test-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["params"]["max_nodes"], 32);
+        assert_eq!(value["params"]["max_depth"], 4);
+        assert_eq!(value["params"]["patterns"], false);
     }
 }

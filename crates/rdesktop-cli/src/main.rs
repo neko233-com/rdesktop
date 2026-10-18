@@ -75,7 +75,7 @@ enum Commands {
         /// Discovery JSON printed by `rdesktop dev`; contains a local credential
         #[arg(long)]
         session: PathBuf,
-        /// windows, dom, elements, state, evaluate, action, cdp, events,
+        /// info, windows, dom, elements, state, evaluate, action, cdp, events,
         /// accessibility, uia, audit, screenshot, window, reload, ipc, exit or recording[/start|/stop|/file]
         command: String,
         #[arg(long)]
@@ -553,7 +553,8 @@ async fn agent_response(
     anyhow::ensure!(
         matches!(
             command,
-            "windows"
+            "info"
+                | "windows"
                 | "dom"
                 | "elements"
                 | "state"
@@ -583,13 +584,17 @@ async fn agent_response(
         .no_proxy()
         .timeout(std::time::Duration::from_secs(60))
         .build()?;
-    let url = format!(
-        "{}{}/{}",
-        session.url,
-        rdesktop_dev::native::NATIVE_AGENT_PREFIX,
-        command
-    );
-    let request = if command == "recording/file" {
+    let url = if command == "info" {
+        format!("{}/__rdesktop__/info", session.url)
+    } else {
+        format!(
+            "{}{}/{}",
+            session.url,
+            rdesktop_dev::native::NATIVE_AGENT_PREFIX,
+            command
+        )
+    };
+    let request = if matches!(command, "recording/file" | "info") {
         client.get(url)
     } else {
         client.post(url).json(&params)
