@@ -2370,7 +2370,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-bundler"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "rdesktop-core",
@@ -2384,7 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-cef"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "chromiumoxide",
@@ -2402,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-cli"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -2421,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-core"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-dev"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "axum",
@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "rdesktop-webview"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "base64",

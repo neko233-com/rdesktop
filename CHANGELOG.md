@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.12
+
+The native Agent discovers renderer-owned Windows dialogs with opaque lifetime
+IDs and supports their real UIA patterns. System-brokered WebView2 file pickers
+must prove both an immediate raw UIA child relation and the native owner chain.
+Reused handles, closed/reparented windows and cross-renderer targets fail.
+Window metadata reads no longer require the UI event loop, so they remain
+available during modals; provider calls run outside the window registry lock.
+
+`native-screenshot` captures one visible native window through Windows Graphics
+Capture, including its OS frame. PNG output is bounded, serialized and checked
+against the target's lifetime. Stable DWM bounds must match captured pixels
+before screen-coordinate headers are provided. Hidden/minimized windows fail
+without being shown or restored; WebView content capture remains available.
+All native inspector/capture code is absent from ordinary production builds.
+
+`NativeRuntime::dispatch_window` queues window-scoped UI operations without a
+synchronous reply deadline. A new real-dialog verifier covers 11 groups,
+including a modal open beyond 30 seconds, native cancellation, cross-process
+file pickers, decoded compositor pixels, coordinates, CLI output, isolation
+and stale IDs. Existing visible/hidden engine, keyboard, AX, axe, UIA action
+and collection regressions remain part of acceptance. Narrator/NVDA speech
+and arbitrary external OS surfaces still require separate acceptance.
+
 ## 0.1.11
 
 Native UIA now reads grid cells, merged spans, table/cell headers, selected-item
