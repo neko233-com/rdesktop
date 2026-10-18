@@ -1,5 +1,12 @@
 # rdesktop
 
+Windows 开发默认运行真实 Rust 桌面应用：`rdesktop dev`。通过
+`rdesktop dev --headless` 隐藏启动窗口，通过 `rdesktop agent --session <文件>`
+检查实际 WebView2 的 DOM、输入、窗口、IPC、日志和截图；前端修改可热重载。
+浏览器预览使用 `rdesktop dev --browser`。调试服务仅在显式启用的 debug 构建中存在，
+普通 release 构建不能通过环境变量开启。完整接口、构建隔离与验收范围见
+[原生 Agent 开发文档](docs/NATIVE_AGENT.md)。本文后续浏览器接口示例适用于 `--browser`。
+
 [English](README.md) | **简体中文**
 
 [![Crates.io](https://img.shields.io/crates/v/rdesktop-cli.svg)](https://crates.io/crates/rdesktop-cli)

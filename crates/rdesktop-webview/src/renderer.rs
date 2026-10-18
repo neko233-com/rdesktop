@@ -447,6 +447,8 @@ fn to_tao_resize(edge: ResizeEdge) -> tao::window::ResizeDirection {
 /// secondary window leaves the other windows alive. Before hiding decorations,
 /// the application must mount accessible caption controls and resize handles.
 pub struct WebViewRenderer {
+    #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+    native_agent: Option<crate::native_agent::NativeAgent>,
     _config: AppConfig,
     native_runtime: crate::runtime::NativeRuntime,
     native_events: Option<crate::runtime::NativeEventHandler>,
@@ -465,8 +467,27 @@ pub struct WebViewRenderer {
 }
 
 impl WebViewRenderer {
+    /// Opt in to the real Windows WebView2 Agent API for this development run.
+    /// Requires feature `native-agent`, debug assertions, and RDESKTOP_AGENT=1.
+    /// Release builds return false without inspecting any debug environment.
+    /// See rdesktop-dev's native transport for CLI session discovery.
+    pub fn enable_native_agent_from_env(&mut self) -> Result<bool> {
+        #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+        if std::env::var("RDESKTOP_AGENT").is_ok_and(|value| value == "1") {
+            if self.native_agent.is_none() {
+                self.native_agent = Some(crate::native_agent::NativeAgent::start(
+                    self.native_runtime.clone(),
+                )?);
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub fn new(config: &AppConfig) -> Result<Self> {
         Ok(Self {
+            #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+            native_agent: None,
             _config: config.clone(),
             native_runtime: Default::default(),
             native_events: None,
@@ -895,6 +916,12 @@ impl Renderer for WebViewRenderer {
 
     fn run(mut self: Box<Self>) -> Result<()> {
         tracing::info!("Starting WebView event loop");
+        #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+        let mut native_agent = self.native_agent.take();
+        #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+        let headless = native_agent.as_ref().is_some_and(|agent| agent.headless);
+        #[cfg(not(all(windows, debug_assertions, feature = "native-agent")))]
+        let headless = false;
 
         let ipc_handler = self.ipc_handler.take();
         let webgpu_enabled = self._config.renderer.webgpu;
@@ -1016,7 +1043,7 @@ impl Renderer for WebViewRenderer {
                         let rdesktop_id = &rdesktop_id;
                         let mut window_builder = WindowBuilder::new()
                             .with_title(&window_config.title)
-                            .with_visible(!resident)
+                            .with_visible(!resident && !headless)
                             .with_inner_size(tao::dpi::LogicalSize::new(
                                 window_config.width,
                                 window_config.height,
@@ -1256,6 +1283,13 @@ impl Renderer for WebViewRenderer {
                             }
                         };
 
+                        #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+                        if let Some(agent) = &native_agent { agent.attach(*rdesktop_id, &webview); }
+                        // An inherited Windows STARTUPINFO SW_HIDE can consume
+                        // the builder's first show request. Explicit visible
+                        // windows must still appear after WebView setup.
+                        if !resident && !headless { window.set_visible(true); }
+
                         #[cfg(target_os = "windows")]
                         let resize_border = match crate::windows_frame::NativeResizeBorder::new(
                             &window, window_config.min_size.is_some(), window_config.max_size.is_some()) {
@@ -1280,6 +1314,8 @@ impl Renderer for WebViewRenderer {
                         tracing::info!(rdesktop_id = rdesktop_id, ?tao_id, "Window created");
                         if let Some((_, reply)) = initial_content.remove(rdesktop_id) {
                             if reply.send(Ok(*rdesktop_id)).is_err() {
+                                #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+                                if let Some(agent) = &native_agent { agent.detach(*rdesktop_id); }
                                 windows.remove(&tao_id);
                                 rdesktop_to_tao.remove(rdesktop_id);
                                 tao_to_rdesktop.remove(&tao_id);
@@ -1296,14 +1332,31 @@ impl Renderer for WebViewRenderer {
                     }
                     crate::runtime::Request::Dispatch(task) => task(),
                     crate::runtime::Request::Close(id) => {
+                        #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+                        if let Some(agent) = &native_agent { agent.detach(id); }
                         if let Some(tao_id) = rdesktop_to_tao.remove(&id) {
                             tao_to_rdesktop.remove(&tao_id);
                             windows.remove(&tao_id);
                             if let Some(handler) = &native_events { handler(id, crate::runtime::NativeEvent::Destroyed); }
+                            if windows.is_empty() && !resident { *control_flow = ControlFlow::Exit; }
                         }
                     }
                     crate::runtime::Request::Exit => *control_flow = ControlFlow::Exit,
                     crate::runtime::Request::Create { .. } => unreachable!(),
+                }
+            }
+            // Native operations (notably creating another WebView) can pump
+            // nested Windows messages. Deliver replies on every wake instead
+            // of relying on a later MainEventsCleared boundary.
+            let responses: Vec<(u64, String)> = ipc_response_queue.lock().unwrap().drain(..).collect();
+            for (rdesktop_id, json) in responses {
+                if let Some(entry) = rdesktop_to_tao.get(&rdesktop_id).and_then(|id|windows.get(id)) {
+                    if let Ok(js) = serde_json::to_string(&json) {
+                        let script = format!("window.__RDESKTOP_IPC__({js})");
+                        if let Err(error) = entry.webview.evaluate_script(&script) {
+                            tracing::warn!(window_id=rdesktop_id,%error,"Native IPC response evaluation failed");
+                        }
+                    }
                 }
             }
             match event {
@@ -1336,6 +1389,8 @@ impl Renderer for WebViewRenderer {
                         }
                     }
                     if let Some(rd_id) = tao_to_rdesktop.remove(&window_id) {
+                        #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+                        if let Some(agent) = &native_agent { agent.detach(rd_id); }
                         rdesktop_to_tao.remove(&rd_id);
                     }
                     windows.remove(&window_id);
@@ -1396,22 +1451,6 @@ impl Renderer for WebViewRenderer {
                 }
 
                 Event::MainEventsCleared => {
-                    // Drain IPC response queue
-                    let responses: Vec<(u64, String)> = {
-                        let mut queue = ipc_response_queue.lock().unwrap();
-                        queue.drain(..).collect()
-                    };
-                    for (rdesktop_id, json) in responses {
-                        if let Some(tao_id) = rdesktop_to_tao.get(&rdesktop_id) {
-                            if let Some(entry) = windows.get(tao_id) {
-                                if let Ok(js) = serde_json::to_string(&json) {
-                                    let script = format!("window.__RDESKTOP_IPC__({js})");
-                                    let _ = entry.webview.evaluate_script(&script);
-                                }
-                            }
-                        }
-                    }
-
                     // Drain external outbox (native → frontend pushes)
                     let outbox_msgs: Vec<String> = {
                         let mut queue = outbox_for_loop.lock().unwrap();
@@ -1440,6 +1479,8 @@ impl Renderer for WebViewRenderer {
                                 }
                             }
                             if let Some(tao_id) = rdesktop_to_tao.remove(&cmd.rdesktop_id) {
+                                #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+                                if let Some(agent) = &native_agent { agent.detach(cmd.rdesktop_id); }
                                 tao_to_rdesktop.remove(&tao_id);
                                 windows.remove(&tao_id);
                                 if windows.is_empty() && !resident {
@@ -1482,6 +1523,11 @@ impl Renderer for WebViewRenderer {
 
                 Event::LoopDestroyed => {
                     native_runtime.shutdown();
+                    #[cfg(all(windows, debug_assertions, feature = "native-agent"))]
+                    if let Some(agent) = &mut native_agent {
+                        windows.clear();
+                        agent.finish();
+                    }
                     tracing::info!("WebView event loop destroyed");
                 }
 

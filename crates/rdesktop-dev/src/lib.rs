@@ -31,6 +31,7 @@
 //! - `GET /__rdesktop__/agent/recording/file` - Download the finalized recording
 
 pub mod agent_api;
+pub mod native;
 mod native_recorder;
 pub mod server;
 

@@ -51,6 +51,8 @@ dist/
 # Environment
 .env
 .env.local
+.rdesktop/
+.cache/
 
 # mimocode
 .mimocode/

@@ -130,6 +130,8 @@ impl Default for ScreenshotPublisher {
 /// Shared state for the development server.
 #[derive(Clone)]
 pub struct DevServerState {
+    pub agent_mode: bool,
+    pub native_frontend: bool,
     /// The last captured DOM snapshot (for agent queries).
     pub last_dom_snapshot: Arc<RwLock<Option<String>>>,
 
@@ -189,6 +191,8 @@ impl DevServerState {
 
         Self {
             last_dom_snapshot: Arc::new(RwLock::new(None)),
+            agent_mode: true,
+            native_frontend: false,
             last_app_state: Arc::new(RwLock::new(None)),
             frontend_dir,
             hot_reload,
@@ -271,7 +275,7 @@ impl RecordingStore {
         Self::with_native(output_path, None)
     }
 
-    fn new_native(output_path: PathBuf) -> Self {
+    pub(crate) fn new_native(output_path: PathBuf) -> Self {
         Self::with_native(output_path, Some(Arc::new(NativeRecorder::new())))
     }
 
@@ -650,6 +654,8 @@ impl RecordingStore {
 /// This is NOT the production renderer. It's a development tool that allows
 /// AI agents (and humans) to interact with the app via a browser.
 pub struct DevServer {
+    native_frontend: bool,
+    stop: Arc<Mutex<Option<watch::Sender<bool>>>>,
     config: DevConfig,
     frontend_dir: PathBuf,
     recording: Arc<Mutex<Option<Arc<RecordingStore>>>>,
@@ -662,6 +668,8 @@ impl DevServer {
     /// Create a new DevServer.
     pub fn new(config: DevConfig, frontend_dir: PathBuf) -> Self {
         Self {
+            native_frontend: false,
+            stop: Arc::new(Mutex::new(None)),
             config,
             frontend_dir,
             recording: Arc::new(Mutex::new(None)),
@@ -678,6 +686,8 @@ impl DevServer {
         handler: Arc<dyn IpcHandler>,
     ) -> Self {
         Self {
+            native_frontend: false,
+            stop: Arc::new(Mutex::new(None)),
             config,
             frontend_dir,
             recording: Arc::new(Mutex::new(None)),
@@ -685,6 +695,16 @@ impl DevServer {
             screenshot_path: None,
             screenshot_publisher: ScreenshotPublisher::new(),
         }
+    }
+
+    /// Serve frontend assets and hot reload for a native app, without replacing
+    /// its privileged IPC with the simulated browser bridge. Agent endpoints on
+    /// this unauthenticated asset port are disabled.
+    pub fn with_native_frontend(mut self) -> Self {
+        self.native_frontend = true;
+        self.config.agent_mode = false;
+        self.config.open_browser = false;
+        self
     }
 
     /// Keep a stable on-disk copy for humans and external image viewers. The
@@ -703,15 +723,20 @@ impl DevServer {
     /// Returns the URL where the server is listening.
     pub async fn start(&self) -> anyhow::Result<String> {
         let addr = format!("{}:{}", self.config.host, self.config.port);
-        let url = format!("http://{}", addr);
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let (stop, stopped) = watch::channel(false);
+        *self.stop.lock().await = Some(stop);
 
-        let state = DevServerState::new(
+        let mut state = DevServerState::new(
             self.frontend_dir.clone(),
             self.config.hot_reload,
             self.screenshot_publisher.clone(),
             self.screenshot_path.clone(),
             self.ipc_handler.clone(),
         );
+        state.agent_mode = self.config.agent_mode;
+        state.native_frontend = self.native_frontend;
         *self.recording.lock().await = Some(state.recording.clone());
         state.recording.prepare().await?;
 
@@ -719,10 +744,14 @@ impl DevServer {
             let signature = frontend_signature(&state.frontend_dir);
             *state.frontend_signature.write().await = signature;
             let watch_state = state.clone();
+            let mut watch_stop = stopped.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));
                 loop {
-                    interval.tick().await;
+                    tokio::select! {
+                        _ = interval.tick() => {},
+                        _ = watch_stop.changed() => break,
+                    }
                     let current = frontend_signature(&watch_state.frontend_dir);
                     let mut previous = watch_state.frontend_signature.write().await;
                     if *previous != current {
@@ -801,12 +830,35 @@ impl DevServer {
                 "/__rdesktop__/agent/action/result",
                 post(agent_api::report_action_result),
             )
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                |AxumState(state): AxumState<DevServerState>,
+                 request: Request,
+                 next: axum::middleware::Next| async move {
+                    if !state.agent_mode {
+                        return response_text(
+                            StatusCode::NOT_FOUND,
+                            "Agent API disabled on this asset port",
+                        );
+                    }
+                    next.run(request).await
+                },
+            ))
             // Health check
             .route("/__rdesktop__/health", get(|| async { "ok" }))
             // Dev info
             .route("/__rdesktop__/info", get(dev_info))
             .route("/__rdesktop__/reload", get(reload_status))
             .route("/__rdesktop__/bridge.js", get(bridge_script))
+            .route(
+                "/__rdesktop__/native-reload.js",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "text/javascript")],
+                        include_str!("../assets/native-reload.js"),
+                    )
+                }),
+            )
             // State update from browser
             .route("/__rdesktop__/state", post(update_state))
             .route("/__rdesktop__/dom", post(update_dom))
@@ -821,13 +873,18 @@ impl DevServer {
             tracing::info!("Agent API available at {}/__rdesktop__/agent/", url);
         }
 
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
         tracing::info!("Listening on {}", addr);
 
         // Spawn the server
         let server_url = url.clone();
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
+            let mut stopped = stopped;
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = stopped.changed().await;
+                })
+                .await
+            {
                 tracing::error!("Server error: {}", e);
             }
         });
@@ -846,6 +903,9 @@ impl DevServer {
     /// exits. Native MP4 recording is finalized; browser fallback recordings
     /// are marked failed so their partial chunks do not remain as garbage.
     pub async fn shutdown(&self) -> anyhow::Result<()> {
+        if let Some(stop) = self.stop.lock().await.take() {
+            let _ = stop.send(true);
+        }
         let recording = self.recording.lock().await.take();
         let Some(recording) = recording else {
             return Ok(());
@@ -946,12 +1006,20 @@ async fn serve_frontend(AxumState(state): AxumState<DevServerState>, request: Re
         .unwrap_or(false);
     let body = if is_html {
         let mut html = String::from_utf8_lossy(&bytes).into_owned();
-        if !html.contains("/__rdesktop__/bridge.js") {
-            let bridge = "<script src=\"/__rdesktop__/bridge.js\"></script>";
+        let script = if state.native_frontend {
+            "/__rdesktop__/native-reload.js"
+        } else {
+            "/__rdesktop__/bridge.js"
+        };
+        if !html.contains(script) {
+            let generation = state.reload_generation.load(Ordering::Relaxed);
+            let bridge = format!(
+                "<script data-rdesktop-generation=\"{generation}\" src=\"{script}\"></script>"
+            );
             if let Some(index) = html.to_ascii_lowercase().find("</head>") {
-                html.insert_str(index, bridge);
+                html.insert_str(index, &bridge);
             } else {
-                html.insert_str(0, bridge);
+                html.insert_str(0, &bridge);
             }
         }
         Body::from(html)
@@ -962,6 +1030,7 @@ async fn serve_frontend(AxumState(state): AxumState<DevServerState>, request: Re
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type(&file_path))
+        .header(header::CACHE_CONTROL, "no-store")
         .body(body)
         .expect("frontend response is valid")
 }

@@ -18,6 +18,10 @@ tokio = { workspace = true }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 open = "5"
+base64 = "0.22"
+getrandom = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61.3", features = [
@@ -29,3 +33,6 @@ windows = { version = "0.61.3", features = [
 
 [features]
 default = []
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

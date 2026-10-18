@@ -12,6 +12,7 @@ members = [
     "examples/wallpaper",
     "examples/global_hotkey",
     "examples/input_sim",
+    "examples/native_agent",
 ]
 
 [workspace.package]

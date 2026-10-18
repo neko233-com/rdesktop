@@ -1,0 +1,14 @@
+{
+  "name": "rdesktop",
+  "version": "0.1.8",
+  "description": "Native-first Rust desktop framework and authenticated Agent CLI for Windows x64",
+  "license": "MIT OR Apache-2.0",
+  "repository": {"type": "git", "url": "https://github.com/neko233-com/rdesktop.git", "directory": "npm/rdesktop"},
+  "homepage": "https://github.com/neko233-com/rdesktop#readme",
+  "bin": {"rdesktop": "bin/rdesktop.mjs"},
+  "files": ["bin/rdesktop.mjs", "bin/rdesktop.exe", "SHA256SUMS.txt", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "engines": {"node": ">=20.11"},
+  "publishConfig": {"access": "public", "registry": "https://registry.npmjs.org"}
+}

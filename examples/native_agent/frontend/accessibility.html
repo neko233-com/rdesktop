@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Native accessibility fixture</title>
+<style>
+*{box-sizing:border-box}html{font:100% system-ui;color:#172136;background:#f5f6f8}body{margin:0;padding:1.5rem}main{max-width:46rem;margin:auto}h1{font-size:1.6rem}section{background:#fff;border:1px solid #bcc5d2;border-radius:.5rem;padding:1rem;margin:1rem 0}button,input,select{font:inherit;padding:.6rem;border:1px solid #76859b;border-radius:.3rem}button{background:#1c55b0;color:#fff;cursor:pointer}button:disabled{background:#e0e4ea;color:#515d6e}label{display:block;margin:.6rem 0}fieldset{border:1px solid #abb8ca}a{color:#174c9f}:focus-visible{outline:3px solid #111;outline-offset:3px}.skip{position:absolute;top:-10rem}.skip:focus{top:0;background:#fff;padding:.5rem}dialog{color:#172136;border:2px solid #3c526e;padding:1.5rem;max-width:90vw}dialog::backdrop{background:#0006}[role=tablist]{display:flex;gap:.5rem}[role=tabpanel]{padding:.6rem;border:1px solid #bcc5d2}[aria-selected=true]{background:#163a72}[role=treeitem]:focus{outline:3px solid #111}table{border-collapse:collapse}td,th{border:1px solid #abb8ca;padding:.5rem}iframe{width:100%;height:8rem;border:1px solid #abb8ca}input[type=text],input[type=password]{max-width:100%;width:100%}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important}}@media(forced-colors:active){button,:focus-visible{border:2px solid ButtonText;outline-color:Highlight}}
+</style></head><body>
+<a class="skip" href="#main">Skip to content</a>
+<main id="main" tabindex="-1" aria-label="Native app content"><h1>Native accessibility</h1>
+<section aria-labelledby="forms-title"><h2 id="forms-title">Form semantics</h2>
+<label for="display-name">Display name</label><input id="display-name" required aria-describedby="name-help"><p id="name-help">Used only in this local test.</p>
+<label for="email">Email</label><input id="email" type="email" aria-invalid="true" aria-errormessage="email-error"><p id="email-error" role="alert">Enter a valid email address.</p>
+<fieldset><legend>Preferences</legend><label><input id="notifications" type="checkbox"> Receive notifications</label><label><input id="local" type="radio" name="storage" checked> Local storage</label><label><input id="remote" type="radio" name="storage"> Remote storage</label></fieldset>
+<label for="volume">Volume</label><input id="volume" type="range" min="0" max="100" value="50">
+<button id="disabled" disabled>Unavailable action</button><button id="aria-disabled" aria-disabled="true">Unavailable custom action</button><button hidden>Hidden action</button>
+<label for="secret">Example password</label><input id="secret" type="password" value="owned-test-secret">
+<button id="save" type="button">Save preferences</button><p id="status" role="status" aria-live="polite">No changes saved</p></section>
+<section aria-labelledby="disclosure-title"><h2 id="disclosure-title">Disclosure and dialog</h2>
+<button id="disclosure" aria-expanded="false" aria-controls="details">Show details</button><div id="details" hidden><p>Expanded details content</p></div>
+<button id="open-dialog">Open preferences dialog</button><dialog aria-labelledby="dialog-title" id="dialog"><h2 id="dialog-title">Preferences dialog</h2><p>Native HTML modal dialog.</p><button id="close-dialog" autofocus>Close preferences dialog</button></dialog></section>
+<section aria-labelledby="navigation-title"><h2 id="navigation-title">Tabs and tree</h2>
+<div role="tablist" aria-label="Views"><button role="tab" id="tab-one" aria-selected="true" aria-controls="panel-one">First view</button><button role="tab" id="tab-two" aria-selected="false" aria-controls="panel-two" tabindex="-1">Second view</button></div>
+<div role="tabpanel" id="panel-one" aria-labelledby="tab-one">First panel</div><div role="tabpanel" id="panel-two" aria-labelledby="tab-two" hidden>Second panel</div>
+<ul role="tree" aria-label="Folders"><li role="treeitem" id="tree-root" aria-expanded="false" tabindex="0">Projects<ul role="group" hidden><li role="treeitem" tabindex="-1">Child folder</li></ul></li></ul>
+<table><caption>Compatibility examples</caption><thead><tr><th scope="col">Surface</th><th scope="col">State</th></tr></thead><tbody><tr><th scope="row">Native WebView</th><td>Ready</td></tr></tbody></table></section>
+<section aria-labelledby="embedded-title"><h2 id="embedded-title">Shadow DOM and embedded frame</h2><div id="shadow"></div><iframe title="Embedded accessible content" src="accessibility-frame.html"></iframe></section>
+</main><script>
+save.onclick=()=>document.querySelector('#status').textContent='Preferences saved locally';
+disclosure.onclick=()=>{const expanded=disclosure.getAttribute('aria-expanded')!=='true';disclosure.setAttribute('aria-expanded',String(expanded));details.hidden=!expanded;};
+document.querySelector('#open-dialog').onclick=()=>dialog.showModal();document.querySelector('#close-dialog').onclick=()=>dialog.close();
+const tabs=[...document.querySelectorAll('[role=tab]')];
+function selectTab(tab){for(const item of tabs){const active=item===tab;item.setAttribute('aria-selected',String(active));item.tabIndex=active?0:-1;document.querySelector('#'+item.getAttribute('aria-controls')).hidden=!active;}tab.focus();}
+for(const tab of tabs){tab.onclick=()=>selectTab(tab);tab.onkeydown=event=>{if(event.key==='ArrowRight'||event.key==='ArrowLeft'){event.preventDefault();selectTab(tabs[(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:tabs.length-1))%tabs.length]);}};}
+const treeRoot=document.querySelector('#tree-root');treeRoot.onkeydown=event=>{if(event.key==='ArrowRight'||event.key==='ArrowLeft'){event.preventDefault();const expanded=event.key==='ArrowRight';treeRoot.setAttribute('aria-expanded',String(expanded));treeRoot.querySelector('[role=group]').hidden=!expanded;}};
+const shadowRoot=document.querySelector('#shadow').attachShadow({mode:'open'});shadowRoot.innerHTML='<button type="button" style="font:inherit;padding:10px;border:1px solid #76859b;color:#fff;background:#1c55b0">Shadow save</button>';
+shadowRoot.querySelector('button').onclick=()=>document.querySelector('#status').textContent='Shadow action completed';
+</script></body></html>

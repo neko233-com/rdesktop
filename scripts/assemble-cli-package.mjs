@@ -1,0 +1,24 @@
+// Assemble a local Windows release artifact. Does not publish or install it.
+import {readFile,writeFile,mkdir,copyFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import {resolve,join} from 'node:path';
+import {spawnSync} from 'node:child_process';
+import assert from 'node:assert/strict';
+const root=resolve(import.meta.dirname,'..');
+const version=(await readFile(join(root,'Cargo.toml'),'utf8')).match(/\[workspace\.package\][\s\S]*?version = "([^"]+)"/)[1];
+const binary=join(root,'target/release/rdesktop.exe');
+const bytes=await readFile(binary);assert.equal(bytes.subarray(0,2).toString(),'MZ');
+assert.equal(bytes.readUInt16LE(bytes.readUInt32LE(0x3c)+4),0x8664,'expected an AMD64 PE');
+const run=spawnSync(binary,['--version'],{encoding:'utf8',windowsHide:true});assert.equal(run.status,0,run.stderr);assert.equal(run.stdout.trim(),`rdesktop ${version}`);
+const sha256=createHash('sha256').update(bytes).digest('hex');
+const source=join(root,'npm/rdesktop');const stage=join(root,'.cache/npm-stage',`rdesktop-${version}`);
+await mkdir(join(stage,'bin'),{recursive:true});
+const manifest=JSON.parse(await readFile(join(source,'package.json'),'utf8'));assert.equal(manifest.version,version);
+manifest.rdesktopBinarySha256=sha256;
+await writeFile(join(stage,'package.json'),JSON.stringify(manifest,null,2)+'\n');
+for(const name of ['README.md','bin/rdesktop.mjs'])await copyFile(join(source,name),join(stage,name));
+for(const name of ['LICENSE-MIT','LICENSE-APACHE'])await copyFile(join(root,name),join(stage,name));
+await copyFile(binary,join(stage,'bin/rdesktop.exe'));
+await writeFile(join(stage,'SHA256SUMS.txt'),`${sha256}  bin/rdesktop.exe\n`);
+const wrapped=spawnSync(process.execPath,[join(stage,'bin/rdesktop.mjs'),'--version'],{encoding:'utf8',windowsHide:true});assert.equal(wrapped.status,0,wrapped.stderr);assert.equal(wrapped.stdout.trim(),`rdesktop ${version}`);
+console.log(JSON.stringify({version,stage,binarySha256:sha256,binaryBytes:bytes.length},null,2));

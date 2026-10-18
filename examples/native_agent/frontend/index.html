@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Native Agent fixture</title>
+<style>
+*{box-sizing:border-box}body{margin:0;padding:32px;background:#f4f5f7;color:#202630;font:16px system-ui}main{max-width:700px;margin:auto}h1{font-size:25px}p{color:#5b6473}section{background:white;border:1px solid #dde1e7;border-radius:10px;padding:20px;margin:16px 0}label{display:block;margin-bottom:10px}input,button,select{font:inherit;padding:9px 12px;border:1px solid #b8c0ce;border-radius:5px}button{background:#2262cc;color:white;cursor:pointer}input{width:55%;margin-right:8px}output{display:block;min-height:32px;margin-top:14px}#drag{display:inline-block;padding:12px;background:#e4edff;cursor:grab}#drop{padding:20px;border:2px dashed #96a8c3;margin-top:10px}
+</style></head><body><main><h1>Real desktop · rdesktop</h1>
+<p id="version">Native WebView2 + Rust IPC. Development fixture.</p>
+<section><form id="form"><label for="name">Your name</label><input id="name" placeholder="Type a name"><button id="greet">Greet through Rust</button></form><output id="result">Ready</output></section>
+<section><button id="second">Open second native window</button> <select id="choice" aria-label="Theme"><option>Light</option><option>Dark</option></select><p id="choice-result">Light</p></section>
+<section><span draggable="true" id="drag">Drag inside WebView</span><div id="drop">Drop target</div><output id="drag-result">No drop</output></section>
+</main><script>
+window.__RDESKTOP_AGENT_STATE__={greetings:0};
+form.addEventListener('submit',async event=>{event.preventDefault();const reply=await window.__RDESKTOP_INVOKE__('greet',{name:document.querySelector('#name').value});result.textContent=reply.data.message;window.__RDESKTOP_AGENT_STATE__.greetings++;console.info('native-greet',reply.data.pid);});
+document.querySelector('#second').onclick=()=>window.__RDESKTOP_INVOKE__('second',{});
+choice.onchange=()=>document.querySelector('#choice-result').textContent=choice.value;
+drag.ondragstart=event=>{event.dataTransfer.setData('text/plain','rdesktop-native-drag');};
+drop.ondragover=event=>event.preventDefault();drop.ondrop=event=>{event.preventDefault();document.querySelector('#drag-result').textContent=event.dataTransfer.getData('text/plain')+' trusted='+event.isTrusted;};
+</script></body></html>

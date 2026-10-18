@@ -31,7 +31,11 @@ Windows targets are permanently out of scope.
 
 ## Project status
 
-rdesktop is an active `0.1.x` project. The browser-based development server, Agent API, renderer abstractions, and visual debugging workflow are the primary focus of the current release line. Native build and installer integrations are still evolving and should be evaluated for the target platform before being used in a production distribution pipeline.
+rdesktop is an active `0.1.x` project. Windows development now runs the real native
+application by default, with authenticated Agent CLI inspection, engine input,
+PNG capture, multi-window targeting and frontend hot reload. The browser preview
+remains available explicitly. See [Native Agent development](docs/NATIVE_AGENT.md)
+for setup, release isolation and the exact limits of hidden-window verification.
 
 The project favors explicit behavior and a small, composable workspace over a single opaque runtime. APIs may change before `1.0.0`.
 
@@ -39,7 +43,7 @@ The project favors explicit behavior and a small, composable workspace over a si
 
 Most desktop web frameworks optimize for one of two things: a small binary or maximum browser compatibility. rdesktop focuses on a third requirement: keeping the application inspectable throughout the agent-driven development loop.
 
-- **Use the browser while developing.** Agents can inspect the DOM, query elements, execute structured actions, and read application state through HTTP.
+- **Develop against the real desktop.** Agents can inspect and operate the application's actual WebView2 through authenticated loopback HTTP; `--headless` starts the same native windows hidden.
 - **Keep native rendering available.** The same application model can target a system WebView or a Chromium-backed renderer.
 - **Verify what a person will see.** Native screenshots and Windows desktop MP4 recordings make visual regressions and interaction flows reviewable by both humans and agents.
 - **Keep platform behavior explicit.** Window state, IPC, global input, hotkeys, overlays, wallpaper windows, and click-through behavior are represented as Rust APIs and configuration.
@@ -72,7 +76,10 @@ The Chromium path requires a supported Chrome, Chromium, or Edge executable on t
 
 ### Agent-first development server
 
-`rdesktop dev` serves the frontend in a normal browser and injects the rdesktop bridge. This gives an agent a conventional browser target while keeping the application’s IPC and interaction model visible.
+`rdesktop dev` launches the Rust desktop application. Its native Agent server
+calls WebView2's internal CDP API without exposing a remote-debugging port.
+`rdesktop dev --browser` serves the separate browser preview and injects the
+browser bridge. The native path retains the application's real Rust IPC.
 
 The development server supports:
 
@@ -172,17 +179,21 @@ The initializer creates a minimal `rdesktop.toml`, Rust entry point, and `fronte
 rdesktop dev
 ```
 
-The server normally listens on `http://localhost:1420` and opens the browser automatically. To keep the process headless for an agent or CI job:
+On Windows this starts the real application and serves `frontend/` with hot
+reload. The CLI prints a local Agent session file path. To start its windows
+hidden while retaining the actual native engine:
 
 ```bash
-rdesktop dev --no-open
+rdesktop dev --headless
 ```
 
 Useful CLI commands are:
 
 ```text
 rdesktop init <name>                 Create a project skeleton
-rdesktop dev [--path <dir>]         Run the browser development server
+rdesktop dev [--path <dir>]         Run the native app with hot reload and Agent API
+rdesktop dev --browser --no-open    Run the browser preview without opening it
+rdesktop agent --session <file> ... Inspect or operate a real native app
 rdesktop build [--chrome]           Build the native application path
 rdesktop bundle --target <target>   Generate a platform bundle
 rdesktop info                       Inspect rdesktop.toml
@@ -266,7 +277,11 @@ Keep `host = "localhost"` unless remote access is explicitly required. Setting i
 
 ## Agent workflow
 
-The development server base URL is normally `http://localhost:1420`. The structured endpoints live below `/__rdesktop__/agent/`.
+For native development use `rdesktop agent --session <file> windows` and the
+[native command contract](docs/NATIVE_AGENT.md). The authenticated native API
+uses an ephemeral port from the session file. The examples below describe the
+explicit **browser preview** (`rdesktop dev --browser`), normally on
+`http://localhost:1420`; its structured endpoints live below `/__rdesktop__/agent/`.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |

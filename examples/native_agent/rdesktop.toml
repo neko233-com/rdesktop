@@ -1,0 +1,15 @@
+[app]
+identifier = "com.rdesktop.native-agent-fixture"
+name = "native_agent"
+version = "0.1.0"
+
+[window]
+title = "rdesktop Native Agent"
+width = 900
+height = 680
+
+[dev]
+host = "127.0.0.1"
+port = 1438
+agent_mode = true
+hot_reload = true

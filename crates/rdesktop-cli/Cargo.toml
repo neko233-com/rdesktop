@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 tokio = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 
 [features]
 default = []

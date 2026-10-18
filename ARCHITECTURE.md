@@ -1,5 +1,11 @@
 # rdesktop Architecture
 
+Native-first development and production isolation are specified in
+[NATIVE_AGENT.md](docs/NATIVE_AGENT.md). Windows WebView2 exposes authenticated
+in-process CDP operations through an opt-in debug-only adapter. It does not
+route native IPC through the browser simulator or open an unauthenticated CDP
+network port. Browser preview is selected explicitly with `dev --browser`.
+
 ## Design Philosophy
 
 rdesktop is built on three core principles:
