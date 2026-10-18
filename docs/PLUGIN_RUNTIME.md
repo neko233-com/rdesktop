@@ -137,6 +137,55 @@ Both policies preserve the CommonJS five-argument wrapper, top-level `this`,
 local declarations shadowing Node globals, and modules loaded after navigation
 has finished. Page-level `setImmediate` and `clearImmediate` remain available.
 
+### Node-owned native packages
+
+`RendererModules::start_with_options` and `RendererBridge::start_with_options`
+accept `RendererNodeOptions { globals, worker_modules }`. Each
+`WorkerModuleBinding { getter, module }` selects an exact module entry file and
+installs a readonly parameterless getter before the original preload executes.
+Calling that getter lazily loads the complete CommonJS/native package in Node
+and returns its cached exports. Its streams, native addon and internal calls
+stay in Node; the original preload's DOM and closures stay in WebView2.
+
+For example, a host may bind a hash-verified Sharp entry to `__nativeSharp` and
+provide it through its image API. The selected file can belong to an independently
+verified shared component outside the plugin package. This grants full Node
+authority; it is not a filesystem sandbox. The application must verify all files
+and licences in that component. The framework canonicalizes the entry, rejects
+duplicate/invalid getter identifiers, limits bindings to 32 and rejects existing
+global collisions. It does not download, search for or bundle native packages.
+The original `start`/`start_with_globals` methods keep their empty binding set.
+
+Trusted preloads can also explicitly use Node's
+`require('node:module').createRequire(__filename)` to select Node-owned packages.
+This is distinct from browser-side CommonJS dependency execution. Loading Sharp's
+JS package through the ordinary browser loader currently fails a chain-call
+regression; the binding does not establish compatibility for that loading path.
+
+Windows x64 acceptance used the original pinned Sharp 0.34.5/libvips 8.17.3
+distribution with Node 24.19.0. Fourteen identical functions produced exactly the
+same results in an independent Node reference and real visible/hidden WebView2:
+native Buffer/hash results, Promise and callback metadata, callback output,
+37-degree rotation, clone isolation, native stream pipeline, SVG raw pixels,
+real file output and invalid-image errors. The visible run used real UIA Invoke
+and a Windows compositor capture. Both runs kept page Node globals absent,
+verified lazy loading and stable module identity, preserved the original module
+file hashes and normally retired the owned Node worker without Electron.
+This accepts that specific native addon distribution, not arbitrary Node ABIs.
+
+```powershell
+# MODULE_MANIFEST lists the exact already-verified module files and SHA-256s.
+# The directory and manifest are supplied by the consuming application.
+node scripts/verify-node-addon-native.mjs binding MODULE_DIRECTORY MODULE_MANIFEST OUTSIDE_OUTPUT
+node scripts/verify-node-addon-native.mjs binding MODULE_DIRECTORY MODULE_MANIFEST OUTSIDE_OUTPUT --headless
+```
+
+The common cases live in `examples/node_plugin/fixtures/addon-cases.cjs`; module
+binaries and QA evidence stay outside Git and the default framework payload.
+The existing visible/hidden preload-only fixture still passes its 24 checks,
+414 Buffer cases and 36 memory cases; the immutable public plugin regression,
+23 Node tests, full workspace tests and clippy also pass with these bindings.
+
 Native verification is repeatable, with all evidence outside the checkout:
 
 ```powershell
@@ -227,8 +276,9 @@ dependency, Node binary or second browser was added to the default CLI payload.
 ## Remaining integration gates
 
 The direct worker mode has no DOM. The renderer mode is experimental: it does
-not yet replace iHub's Electron runtime, ship a production Node executable, or
-establish native addon ABI compatibility. ESM, arbitrary synchronous return
+not yet replace iHub's Electron runtime or ship a production Node executable.
+Native addon acceptance is currently limited to the measured distribution above.
+ESM, arbitrary synchronous return
 values from callbacks into Node, full Buffer/prototype semantics, complete
 callback disposal and application-owned subprocess lifecycle remain incomplete.
 Loading a native addon is delegated to the selected Node ABI and has not been

@@ -156,6 +156,19 @@ function rdesktopNodeRenderer(options) {
     clearImmediate: { value: nodeClearImmediate, configurable: true, writable: true },
     __RDESKTOP_NODE_STATUS__: { value: Object.freeze({ node: options.node, renderer: 'native-webview', electron: false, nodeGlobals: options.exposeNodeGlobals === false ? 'preload-only' : 'page' }), configurable: false },
   });
+  // Native packages can keep their entire JS/stream/native-addon graph in Node
+  // while the original preload retains its real document and DOM closures.
+  // The host selects exact entries; these bindings grant full Node authority.
+  function installWorkerBindings() {
+    for (const binding of options.workerModules || []) {
+      if (Object.hasOwn(window, binding.getter)) throw new TypeError('Worker module getter collides with an existing global: ' + binding.getter);
+      let loaded = false, exports;
+      Object.defineProperty(window, binding.getter, { value() {
+        if (!loaded) { exports = require('node:module').createRequire(options.preload)(binding.module); loaded = true; }
+        return exports;
+      } });
+    }
+  }
   function ensureEvents() { if (!closed && !polling && timer === null) timer = startTimer(pollEvents, 20); }
   function pollEvents() {
     timer = null;
@@ -174,6 +187,6 @@ function rdesktopNodeRenderer(options) {
     finally { polling = false; if (!closed && (callbacks.size || promises.size || released.size)) ensureEvents(); }
   }
   window.addEventListener('pagehide', () => { closed = true; stopTimer(timer); timer = null; for (const pending of promises.values()) pending.reject(new Error('Renderer closed.')); promises.clear(); callbacks.clear(); }, { once: true });
-  try { load(rpc({ operation: 'preload' })); }
+  try { installWorkerBindings(); load(rpc({ operation: 'preload' })); }
   catch (cause) { report(cause); throw cause; }
 }

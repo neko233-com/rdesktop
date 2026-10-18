@@ -5,7 +5,7 @@ use rdesktop_core::{
     renderer::Renderer,
 };
 use rdesktop_node::{
-    renderer::{NodeGlobals, RendererBridge},
+    renderer::{NodeGlobals, RendererBridge, RendererNodeOptions},
     NodeConfig,
 };
 use rdesktop_webview::{NativeEvent, NativeWindowOptions, WebViewRenderer};
@@ -21,7 +21,12 @@ fn main() -> anyhow::Result<()> {
         Ok("page") | Err(_) => NodeGlobals::Page,
         _ => anyhow::bail!("Node globals must be page or preload-only"),
     };
-    let bridge = RendererBridge::start_with_globals(
+    let worker_modules = match std::env::var("RDESKTOP_PLUGIN_WORKER_MODULES") {
+        Ok(value) => serde_json::from_str(&value)?,
+        Err(std::env::VarError::NotPresent) => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let bridge = RendererBridge::start_with_options(
         NodeConfig {
             executable: PathBuf::from(
                 std::env::var_os("RDESKTOP_TEST_NODE")
@@ -35,7 +40,10 @@ fn main() -> anyhow::Result<()> {
             timeout: Duration::from_secs(3),
         },
         std::env::var("RDESKTOP_PLUGIN_ENTRY").unwrap_or_else(|_| "index.html".into()),
-        globals,
+        RendererNodeOptions {
+            globals,
+            worker_modules,
+        },
     )?;
     let mut config = AppConfig::default();
     config.window.title = "rdesktop Native Node Plugin".into();

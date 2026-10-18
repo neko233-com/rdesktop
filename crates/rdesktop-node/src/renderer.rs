@@ -40,6 +40,65 @@ pub enum NodeGlobals {
     PreloadOnly,
 }
 
+/// A host-selected CommonJS/native module executed wholly in Node. The named
+/// parameterless getter is installed before the original preload and lazily
+/// returns cached exports. Applications must verify the dependency distribution.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerModuleBinding {
+    pub getter: String,
+    pub module: PathBuf,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RendererNodeOptions {
+    pub globals: NodeGlobals,
+    pub worker_modules: Vec<WorkerModuleBinding>,
+}
+
+fn worker_bindings(bindings: &[WorkerModuleBinding]) -> Result<Value, NodeError> {
+    if bindings.len() > 32 {
+        return Err(NodeError::Configuration(
+            "at most 32 worker module bindings are supported".into(),
+        ));
+    }
+    let mut names = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for binding in bindings {
+        let valid = !binding.getter.is_empty()
+            && binding.getter.len() <= 128
+            && binding.getter.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphabetic()
+                    || matches!(byte, b'_' | b'$')
+                    || (index > 0 && byte.is_ascii_digit())
+            });
+        if !valid || !names.insert(&binding.getter) {
+            return Err(NodeError::Configuration(
+                "worker module getters must be unique JavaScript identifiers".into(),
+            ));
+        }
+        let module = fs::canonicalize(&binding.module)?;
+        if !module.is_file() {
+            return Err(NodeError::Configuration(
+                "worker module entry must be a regular file".into(),
+            ));
+        }
+        let module = module
+            .to_str()
+            .ok_or_else(|| NodeError::Configuration("worker module path must be UTF-8".into()))?;
+        // Node's CommonJS loader needs a drive/UNC path, rather than the extended
+        // path produced by Windows canonicalize. Keep other platforms literal.
+        #[cfg(windows)]
+        let module = if let Some(path) = module.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{path}")
+        } else {
+            module.strip_prefix(r"\\?\").unwrap_or(module).to_owned()
+        };
+        result.push(json!({"getter":binding.getter,"module":module}));
+    }
+    Ok(json!(result))
+}
+
 /// Opt-in bridge; it does not bundle Node, a browser, Electron or uTools APIs.
 /// The initial script loads the original preload into the page's JS context.
 pub struct RendererBridge {
@@ -79,6 +138,21 @@ impl RendererModules {
         base_url: &str,
         globals: NodeGlobals,
     ) -> Result<Self, NodeError> {
+        Self::start_with_options(
+            config,
+            base_url,
+            RendererNodeOptions {
+                globals,
+                ..Default::default()
+            },
+        )
+    }
+    pub fn start_with_options(
+        config: NodeConfig,
+        base_url: &str,
+        options: RendererNodeOptions,
+    ) -> Result<Self, NodeError> {
+        let bindings = worker_bindings(&options.worker_modules)?;
         if config.timeout > Duration::from_secs(5) {
             return Err(NodeError::Configuration(
                 "renderer Node calls must use a deadline of at most 5000 ms".into(),
@@ -106,7 +180,7 @@ impl RendererModules {
             .filter(|token| token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .ok_or_else(|| NodeError::Protocol("invalid renderer capability".into()))?
             .to_owned();
-        let options = json!({"base":base_url,"token":token,"preload":metadata["preload"],"node":metadata["node"],"buffer":metadata["buffer"],"exposeNodeGlobals":globals == NodeGlobals::Page});
+        let options = json!({"base":base_url,"token":token,"preload":metadata["preload"],"node":metadata["node"],"buffer":metadata["buffer"],"exposeNodeGlobals":options.globals == NodeGlobals::Page,"workerModules":bindings});
         Ok(Self {
             node,
             origin,
@@ -200,6 +274,21 @@ impl RendererBridge {
         entry: impl AsRef<Path>,
         globals: NodeGlobals,
     ) -> Result<Self, NodeError> {
+        Self::start_with_options(
+            config,
+            entry,
+            RendererNodeOptions {
+                globals,
+                ..Default::default()
+            },
+        )
+    }
+    pub fn start_with_options(
+        config: NodeConfig,
+        entry: impl AsRef<Path>,
+        options: RendererNodeOptions,
+    ) -> Result<Self, NodeError> {
+        let bindings = worker_bindings(&options.worker_modules)?;
         // Sync browser calls must have a short, explicit worker deadline.
         if config.timeout > Duration::from_secs(5) {
             return Err(NodeError::Configuration(
@@ -231,7 +320,7 @@ impl RendererBridge {
             "{origin}{prefix}{}",
             relative.to_string_lossy().replace('\\', "/")
         );
-        let options = json!({"base": format!("{origin}{prefix}"), "token":token,"preload":metadata["preload"],"node":metadata["node"],"buffer":metadata["buffer"],"exposeNodeGlobals":globals == NodeGlobals::Page});
+        let options = json!({"base": format!("{origin}{prefix}"), "token":token,"preload":metadata["preload"],"node":metadata["node"],"buffer":metadata["buffer"],"exposeNodeGlobals":options.globals == NodeGlobals::Page,"workerModules":bindings});
         let script = renderer_script(&options);
         let service = Arc::new(Service {
             root,
@@ -560,12 +649,23 @@ mod tests {
     fn externally_hosted_sessions_keep_the_origin_capability_and_document_gate() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let marker = shared.path().join("not-eagerly-executed");
+        let native_entry = shared.path().join("native-factory.cjs");
+        fs::write(
+            &native_entry,
+            format!(
+                "require('node:fs').writeFileSync({},'loaded');module.exports={{native:true}};",
+                json!(marker)
+            ),
+        )
+        .unwrap();
         fs::write(
             root.path().join("preload.cjs"),
             "window.nodeDocument=document.nodeType;",
         )
         .unwrap();
-        let session = RendererModules::start(
+        let session = RendererModules::start_with_options(
             NodeConfig {
                 executable: std::env::var_os("RDESKTOP_TEST_NODE").unwrap().into(),
                 executable_sha256: std::env::var("RDESKTOP_TEST_NODE_SHA256").unwrap(),
@@ -574,8 +674,20 @@ mod tests {
                 timeout: Duration::from_secs(3),
             },
             "http://127.0.0.1:45678/v1/owned/",
+            RendererNodeOptions {
+                globals: NodeGlobals::PreloadOnly,
+                worker_modules: vec![WorkerModuleBinding {
+                    getter: "__nativeFactory".into(),
+                    module: native_entry,
+                }],
+            },
         )
         .unwrap();
+        assert!(
+            !marker.exists(),
+            "configuration must not eagerly run native packages"
+        );
+        assert!(session.initialization_script().contains("__nativeFactory"));
         let doc = "11111111111111111111111111111111";
         assert_eq!(
             session
