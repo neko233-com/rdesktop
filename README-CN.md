@@ -108,7 +108,9 @@ Windows 原生移动／缩放循环会派发一次 `rdesktop:window-move-resize-
 ### 安装 CLI
 
 ```bash
-cargo install rdesktop-cli --version 0.1.8
+npm install -g rdesktop
+# 也可从固定源码版本安装：
+cargo install --git https://github.com/neko233-com/rdesktop.git --tag v0.1.9 rdesktop-cli
 ```
 
 ### 创建项目

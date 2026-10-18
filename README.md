@@ -161,7 +161,9 @@ native mouse handling or client-area dimensions.
 ### Install the CLI
 
 ```bash
-cargo install rdesktop-cli --version 0.1.8
+npm install -g rdesktop
+# Or install the CLI from this immutable source release:
+cargo install --git https://github.com/neko233-com/rdesktop.git --tag v0.1.9 rdesktop-cli
 ```
 
 ### Create a project
