@@ -44,6 +44,16 @@ pub fn snapshot(hwnd: isize, params: &Value) -> Result<Value, String> {
     .map_err(|e| e.to_string())?;
     let root =
         unsafe { automation.ElementFromHandle(HWND(hwnd as *mut _)) }.map_err(|e| e.to_string())?;
+    // Windows can recycle an HWND after it leaves the native queue. Validate
+    // the provider before traversing any descendants of that handle.
+    if unsafe { root.CurrentProcessId() }.map_err(|e| e.to_string())? as u32 != std::process::id()
+        || unsafe { root.CurrentNativeWindowHandle() }
+            .map_err(|e| e.to_string())?
+            .0 as isize
+            != hwnd
+    {
+        return Err("native accessibility window was replaced".into());
+    }
     let limit = params["max_nodes"].as_u64().unwrap_or(1000).clamp(1, 5000) as usize;
     let depth_limit = params["max_depth"].as_u64().unwrap_or(64).clamp(1, 128) as usize;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -73,7 +83,7 @@ pub fn snapshot(hwnd: isize, params: &Value) -> Result<Value, String> {
                     }
                 }
             }
-            let value = if password == Some(true) {
+            let value = if password != Some(false) {
                 None
             } else {
                 element

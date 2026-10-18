@@ -142,6 +142,11 @@ can skip probing; `view` chooses raw/control/content. No UIA request starts at
 the desktop root or visits another application's windows. Snapshot node IDs
 are not persistent action identifiers.
 
+The UIA root's current process ID and native handle must match the selected
+owned window before descendants are traversed. Values are returned only when
+UIA explicitly identifies a control as non-password; an unknown password
+property is redacted too.
+
 ## What this proves
 
 Hidden mode uses the same native WebView2 and Rust host as visible mode. It
@@ -176,6 +181,12 @@ cargo check --workspace --features rdesktop-webview/native-agent
 cargo test --workspace --features rdesktop-webview/native-agent
 cargo clippy --workspace --all-targets --features rdesktop-webview/native-agent -- -D warnings
 ```
+
+For the separate, explicit desktop recording check, use
+`node scripts/verify-native-recording.mjs SESSION .cache/recording-proof`.
+This captures the entire virtual desktop locally for two seconds and validates
+MP4 finalization, streaming, session checks and idempotency. Never publish its
+video as a release artifact.
 
 The fixture checks actual Rust IPC, Unicode/trusted engine input, keyboard
 submission, two-window isolation and 64-bit identity, native resizing, PNG,
